@@ -1,0 +1,208 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Papel {
+  gestor
+  consultor
+}
+
+enum StatusUsuario {
+  ativo
+  pendente
+  inativo
+}
+
+enum StatusVisita {
+  confirmado
+  realizado
+  pendente
+  cancelado
+}
+
+enum TipoVisita {
+  online
+  presencial
+}
+
+// Canal da interação registrado no relatório de visita.
+enum CanalVisita {
+  presencial
+  virtual_teams
+  virtual_zoom
+  chamada_video
+  telefone
+  outro
+}
+
+enum TipoAusencia {
+  ferias
+  treinamento
+  outra
+}
+
+model Usuario {
+  id                 String                 @id @default(cuid())
+  nome               String
+  email              String                 @unique
+  senhaHash          String
+  papel              Papel
+  regiao             String?
+  status             StatusUsuario          @default(pendente)
+  telefone           String?
+  metaComparecimento Int                    @default(80)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  visitas            Visita[]
+  ausencias          Ausencia[]
+  favoritos          MaterialFavorito[]
+  apresentacoes      RegistroApresentacao[]
+}
+
+model MedicoClinica {
+  id                  String                 @id @default(cuid())
+  nomeMedico          String
+  especialidade       String
+  clinica             String
+  bairro              String
+  padraoHorario       String
+  nivelRelacionamento String?                @default("novo")
+  // Dados de contato (tela "Contas")
+  crm                 String?
+  endereco            String?
+  cidade              String?
+  uf                  String?
+  cep                 String?
+  telefone            String?
+  email               String?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  visitas             Visita[]
+  apresentacoes       RegistroApresentacao[]
+}
+
+model Produto {
+  id        String   @id @default(cuid())
+  nome      String   @unique
+  categoria String?
+  createdAt DateTime @default(now())
+}
+
+model Visita {
+  id               String                 @id @default(cuid())
+  consultorId      String
+  consultor        Usuario                @relation(fields: [consultorId], references: [id], onDelete: Cascade)
+  medicoClinicaId  String
+  medicoClinica    MedicoClinica          @relation(fields: [medicoClinicaId], references: [id], onDelete: Cascade)
+  dataHora         DateTime
+  duracaoMin       Int                    @default(30)
+  // Produto principal. Pode ficar vazio quando a visita nasce arrastando o médico na agenda.
+  produto          String?
+  status           StatusVisita           @default(pendente)
+  tipo             TipoVisita?
+  feedback         String?
+  // Relatório de visita
+  canal            CanalVisita?
+  local            String?
+  motivo           String?
+  foco             String?
+  acompanhada      Boolean                @default(false)
+  acompanhante     String?
+  relatorioSalvoEm DateTime?
+  enviadaEm        DateTime?
+  createdAt        DateTime               @default(now())
+  updatedAt        DateTime               @updatedAt
+  amostras         AmostraEntregue[]
+  apresentacoes    RegistroApresentacao[]
+
+  @@index([consultorId, dataHora])
+}
+
+model AmostraEntregue {
+  id         String @id @default(cuid())
+  visitaId   String
+  visita     Visita @relation(fields: [visitaId], references: [id], onDelete: Cascade)
+  produto    String
+  quantidade Int    @default(1)
+  lote       String?
+}
+
+// Férias, treinamentos/convenções e outras ausências (faixa de "dia inteiro" da agenda).
+model Ausencia {
+  id          String       @id @default(cuid())
+  consultorId String
+  consultor   Usuario      @relation(fields: [consultorId], references: [id], onDelete: Cascade)
+  tipo        TipoAusencia
+  inicio      DateTime
+  fim         DateTime
+  diaInteiro  Boolean      @default(true)
+  descricao   String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([consultorId, inicio])
+}
+
+// Biblioteca de apresentações (material promocional em slides).
+model Material {
+  id           String                 @id @default(cuid())
+  titulo       String
+  descricao    String?
+  codigo       String?
+  produto      String?
+  thumbnailUrl String?
+  ativo        Boolean                @default(true)
+  createdAt    DateTime               @default(now())
+  updatedAt    DateTime               @updatedAt
+  slides       Slide[]
+  favoritos    MaterialFavorito[]
+  registros    RegistroApresentacao[]
+}
+
+model Slide {
+  id         String   @id @default(cuid())
+  materialId String
+  material   Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  ordem      Int
+  titulo     String?
+  secao      String?
+  imagemUrl  String
+  createdAt  DateTime @default(now())
+
+  @@index([materialId, ordem])
+}
+
+model MaterialFavorito {
+  usuarioId  String
+  usuario    Usuario  @relation(fields: [usuarioId], references: [id], onDelete: Cascade)
+  materialId String
+  material   Material @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@id([usuarioId, materialId])
+}
+
+// Registro de que um material foi apresentado a um médico (e em qual visita).
+model RegistroApresentacao {
+  id              String        @id @default(cuid())
+  materialId      String
+  material        Material      @relation(fields: [materialId], references: [id], onDelete: Cascade)
+  consultorId     String
+  consultor       Usuario       @relation(fields: [consultorId], references: [id], onDelete: Cascade)
+  medicoClinicaId String
+  medicoClinica   MedicoClinica @relation(fields: [medicoClinicaId], references: [id], onDelete: Cascade)
+  visitaId        String?
+  visita          Visita?       @relation(fields: [visitaId], references: [id], onDelete: SetNull)
+  inicio          DateTime
+  fim             DateTime
+  duracaoSeg      Int
+  // [{ slideId, segundos }]
+  slidesVistos    Json
+  createdAt       DateTime      @default(now())
+}
