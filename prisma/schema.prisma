@@ -216,3 +216,10 @@ model RegistroApresentacao {
   slidesVistos    Json
   createdAt       DateTime      @default(now())
 }
+
+// Lista de revogação de sessões (logout). Guarda só o jti do token, até a data em que ele expiraria de qualquer forma.
+model SessaoRevogada {
+  jti       String   @id
+  expiraEm  DateTime
+  createdAt DateTime @default(now())
+}

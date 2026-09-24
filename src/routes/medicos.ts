@@ -9,6 +9,16 @@ import { exigirAutenticacao, exigirPapel, RequisicaoAutenticada } from "../middl
 const router = Router();
 router.use(exigirAutenticacao);
 
+// Campos de identificação pessoal do médico que o consultor não precisa para o trabalho de campo
+// (agenda, contas, mapa) — ficam de fora da resposta para esse papel. Ver VULN-01 do pentest de 24/09/2026.
+const CAMPOS_SO_GESTOR = ["cpf", "dtNascimento", "cep", "celMedico", "telClinica", "observacao"] as const;
+
+function paraConsultor<T extends Record<string, unknown>>(m: T): Omit<T, (typeof CAMPOS_SO_GESTOR)[number]> {
+  const copia = { ...m };
+  for (const campo of CAMPOS_SO_GESTOR) delete copia[campo];
+  return copia;
+}
+
 // Leitura liberada para gestor e consultor (precisa escolher médico/clínica ao agendar).
 // Para o consultor, cada médico vem com a última visita enviada e a próxima planejada dele.
 router.get("/", async (req: RequisicaoAutenticada, res) => {
@@ -30,8 +40,9 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
     for (const f of futuras) if (f._min.dataHora) proxima.set(f.medicoClinicaId, f._min.dataHora);
   }
 
+  const ehConsultor = req.usuario!.papel === "consultor";
   const comStatus = medicos.map((m) => ({
-    ...m,
+    ...(ehConsultor ? paraConsultor(m) : m),
     hoje: atendeHoje(m.padraoHorario),
     amanha: atendeAmanha(m.padraoHorario),
     ultimaVisitaEm: ultima.get(m.id)?.toISOString() ?? null,
@@ -67,8 +78,9 @@ router.get("/:id", async (req: RequisicaoAutenticada, res) => {
   ]);
 
   const agora = new Date();
+  const medicoBase = req.usuario!.papel === "consultor" ? paraConsultor(medico) : medico;
   res.json({
-    medico: { ...medico, hoje: atendeHoje(medico.padraoHorario), amanha: atendeAmanha(medico.padraoHorario) },
+    medico: { ...medicoBase, hoje: atendeHoje(medico.padraoHorario), amanha: atendeAmanha(medico.padraoHorario) },
     proximaVisita: visitas
       .filter((v) => v.dataHora >= agora && v.status !== "cancelado")
       .map(serializarVisitaGestor)

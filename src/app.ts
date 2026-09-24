@@ -14,6 +14,8 @@ import apresentacoesRoutes from "./routes/apresentacoes";
 import { ErroHttp } from "./lib/erros";
 
 const app = express();
+// Necessário na Vercel (atrás de proxy) para o rate limiter e req.ip lerem o IP real do cliente.
+app.set("trust proxy", 1);
 
 const ORIGENS_PERMITIDAS = [
   "http://localhost:5173",

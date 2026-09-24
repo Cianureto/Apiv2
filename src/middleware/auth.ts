@@ -13,6 +13,7 @@ export interface RequisicaoAutenticada extends Request {
     status: "ativo" | "pendente" | "inativo";
     metaComparecimento: number;
   };
+  sessao?: { jti: string; expiraEm: Date };
 }
 
 export async function exigirAutenticacao(req: RequisicaoAutenticada, res: Response, next: NextFunction) {
@@ -22,6 +23,11 @@ export async function exigirAutenticacao(req: RequisicaoAutenticada, res: Respon
 
   const payload: SessionPayload | null = verificarToken(token);
   if (!payload) return res.status(401).json({ erro: "Sessão inválida ou expirada." });
+
+  if (payload.jti) {
+    const revogada = await prisma.sessaoRevogada.findUnique({ where: { jti: payload.jti } });
+    if (revogada) return res.status(401).json({ erro: "Sessão encerrada. Faça login novamente." });
+  }
 
   const usuario = await prisma.usuario.findUnique({ where: { id: payload.userId } });
   if (!usuario || usuario.status !== "ativo") return res.status(401).json({ erro: "Conta não encontrada ou inativa." });
@@ -36,7 +42,19 @@ export async function exigirAutenticacao(req: RequisicaoAutenticada, res: Respon
     status: usuario.status,
     metaComparecimento: usuario.metaComparecimento,
   };
+  const decoded = jwtDecodeExp(token);
+  if (payload.jti && decoded) req.sessao = { jti: payload.jti, expiraEm: decoded };
   next();
+}
+
+// Lê só o "exp" do token (já validado acima) sem depender de outra lib.
+function jwtDecodeExp(token: string): Date | null {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split(".")[1], "base64url").toString("utf8"));
+    return typeof payload.exp === "number" ? new Date(payload.exp * 1000) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function exigirPapel(papel: "gestor" | "consultor") {

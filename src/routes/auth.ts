@@ -3,6 +3,7 @@ import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { assinarSessao, hashSenha, verificarSenha } from "../lib/auth";
 import { exigirAutenticacao, RequisicaoAutenticada } from "../middleware/auth";
+import { limitadorAuth } from "../middleware/rateLimit";
 
 const router = Router();
 
@@ -11,7 +12,7 @@ const loginSchema = z.object({
   senha: z.string().min(1),
 });
 
-router.post("/login", async (req, res) => {
+router.post("/login", limitadorAuth, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ erro: "Informe e-mail e senha válidos." });
   const { email, senha } = parsed.data;
@@ -55,30 +56,44 @@ const cadastroSchema = z.object({
   regiao: z.string().optional(),
 });
 
-router.post("/cadastro", async (req, res) => {
+const MENSAGEM_CADASTRO_NEUTRA = "Se este e-mail ainda não tiver conta, ela foi enviada para a fila de aprovação do gestor.";
+
+router.post("/cadastro", limitadorAuth, async (req, res) => {
   const parsed = cadastroSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ erro: parsed.error.issues[0]?.message ?? "Preencha nome, e-mail e senha corretamente." });
   const { nome, email, senha, regiao } = parsed.data;
 
+  // Resposta sempre igual, exista ou não a conta — evita que o cadastro sirva de oráculo de e-mails.
   const existente = await prisma.usuario.findUnique({ where: { email: email.toLowerCase() } });
-  if (existente) return res.status(409).json({ erro: "Já existe uma conta com esse e-mail." });
+  if (!existente) {
+    await prisma.usuario.create({
+      data: {
+        nome,
+        email: email.toLowerCase(),
+        senhaHash: await hashSenha(senha),
+        papel: "consultor",
+        regiao: regiao || null,
+        status: "pendente",
+      },
+    });
+  }
 
-  await prisma.usuario.create({
-    data: {
-      nome,
-      email: email.toLowerCase(),
-      senhaHash: await hashSenha(senha),
-      papel: "consultor",
-      regiao: regiao || null,
-      status: "pendente",
-    },
-  });
-
-  res.status(201).json({ ok: true });
+  res.status(202).json({ ok: true, mensagem: MENSAGEM_CADASTRO_NEUTRA });
 });
 
 router.get("/me", exigirAutenticacao, async (req: RequisicaoAutenticada, res) => {
   res.json({ usuario: req.usuario });
+});
+
+router.post("/logout", exigirAutenticacao, async (req: RequisicaoAutenticada, res) => {
+  if (req.sessao) {
+    await prisma.sessaoRevogada.upsert({
+      where: { jti: req.sessao.jti },
+      update: {},
+      create: { jti: req.sessao.jti, expiraEm: req.sessao.expiraEm },
+    });
+  }
+  res.status(204).end();
 });
 
 export default router;
