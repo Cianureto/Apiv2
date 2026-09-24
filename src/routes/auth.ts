@@ -41,16 +41,23 @@ router.post("/login", async (req, res) => {
   });
 });
 
+const MENSAGEM_SENHA_FRACA = "A senha precisa ter pelo menos 8 caracteres, incluindo letra e número.";
+
+const senhaForte = z
+  .string()
+  .min(8, MENSAGEM_SENHA_FRACA)
+  .refine((v) => /[a-zA-Z]/.test(v) && /[0-9]/.test(v), MENSAGEM_SENHA_FRACA);
+
 const cadastroSchema = z.object({
   nome: z.string().min(1),
   email: z.string().email(),
-  senha: z.string().min(6),
+  senha: senhaForte,
   regiao: z.string().optional(),
 });
 
 router.post("/cadastro", async (req, res) => {
   const parsed = cadastroSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ erro: "Preencha nome, e-mail e senha (mínimo 6 caracteres)." });
+  if (!parsed.success) return res.status(400).json({ erro: parsed.error.issues[0]?.message ?? "Preencha nome, e-mail e senha corretamente." });
   const { nome, email, senha, regiao } = parsed.data;
 
   const existente = await prisma.usuario.findUnique({ where: { email: email.toLowerCase() } });
