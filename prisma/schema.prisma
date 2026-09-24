@@ -63,6 +63,7 @@ model Usuario {
   ausencias          Ausencia[]
   favoritos          MaterialFavorito[]
   apresentacoes      RegistroApresentacao[]
+  materiaisCriados   Material[]             @relation("MaterialCriadoPor")
 }
 
 model MedicoClinica {
@@ -81,6 +82,12 @@ model MedicoClinica {
   cep                 String?
   telefone            String?
   email               String?
+  // Campos importados da planilha de visitas médicas (mantidos para não perder dados já cadastrados)
+  celMedico           String?
+  dtNascimento        String?
+  cpf                 String?
+  telClinica          String?
+  observacao          String?
   createdAt           DateTime               @default(now())
   updatedAt           DateTime               @updatedAt
   visitas             Visita[]
@@ -158,6 +165,9 @@ model Material {
   produto      String?
   thumbnailUrl String?
   ativo        Boolean                @default(true)
+  // Nulo = cadastrado pelo gestor (biblioteca oficial). Preenchido = consultor que criou o material pessoal.
+  criadoPorId  String?
+  criadoPor    Usuario?               @relation("MaterialCriadoPor", fields: [criadoPorId], references: [id], onDelete: SetNull)
   createdAt    DateTime               @default(now())
   updatedAt    DateTime               @updatedAt
   slides       Slide[]

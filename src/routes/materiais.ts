@@ -1,8 +1,8 @@
-import { Router } from "express";
+import { Router, Response, NextFunction } from "express";
 import { z } from "zod";
 import { prisma } from "../lib/prisma";
 import { ErroHttp } from "../lib/erros";
-import { exigirAutenticacao, exigirPapel, RequisicaoAutenticada } from "../middleware/auth";
+import { exigirAutenticacao, RequisicaoAutenticada } from "../middleware/auth";
 
 // Biblioteca de apresentações. As imagens dos slides são URLs (http/https) ou data URLs
 // (o front comprime a imagem antes de enviar). Para muito volume, troque por um storage
@@ -24,7 +24,7 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
   const incluirInativos = req.usuario!.papel === "gestor" && req.query.todos === "1";
 
   const materiais = await prisma.material.findMany({
-    where: incluirInativos ? {} : { ativo: true },
+    where: incluirInativos ? {} : { OR: [{ ativo: true }, { criadoPorId: usuarioId }] },
     orderBy: { titulo: "asc" },
     select: {
       id: true,
@@ -35,6 +35,8 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
       thumbnailUrl: true,
       ativo: true,
       updatedAt: true,
+      criadoPorId: true,
+      criadoPor: { select: { nome: true } },
       _count: { select: { slides: true, registros: true } },
       favoritos: { where: { usuarioId }, select: { usuarioId: true } },
       registros: { where: { consultorId: usuarioId }, select: { inicio: true }, orderBy: { inicio: "desc" }, take: 1 },
@@ -55,6 +57,9 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
       totalApresentacoes: m._count.registros,
       favorito: m.favoritos.length > 0,
       ultimoUsoEm: m.registros[0]?.inicio.toISOString() ?? null,
+      criadoPorId: m.criadoPorId,
+      criadoPorNome: m.criadoPor?.nome ?? null,
+      meuMaterial: m.criadoPorId === usuarioId,
     })),
   });
 });
@@ -65,14 +70,18 @@ router.get("/:id", async (req: RequisicaoAutenticada, res) => {
     include: {
       slides: { orderBy: { ordem: "asc" } },
       favoritos: { where: { usuarioId: req.usuario!.id }, select: { usuarioId: true } },
+      criadoPor: { select: { nome: true } },
     },
   });
-  if (!material || (!material.ativo && req.usuario!.papel !== "gestor")) throw new ErroHttp(404, "Material não encontrado.");
+  const podeVerInativo = req.usuario!.papel === "gestor" || material?.criadoPorId === req.usuario!.id;
+  if (!material || (!material.ativo && !podeVerInativo)) throw new ErroHttp(404, "Material não encontrado.");
 
-  const { favoritos, slides, ...resto } = material;
+  const { favoritos, slides, criadoPor, ...resto } = material;
   res.json({
     material: {
       ...resto,
+      criadoPorNome: criadoPor?.nome ?? null,
+      meuMaterial: material.criadoPorId === req.usuario!.id,
       favorito: favoritos.length > 0,
       slides: slides.map((s) => ({ id: s.id, ordem: s.ordem, titulo: s.titulo, secao: s.secao, imagemUrl: s.imagemUrl })),
     },
@@ -90,7 +99,16 @@ const materialSchema = z.object({
 
 const vazioParaNull = (v?: string) => (v === undefined ? undefined : v.trim() || null);
 
-router.post("/", exigirPapel("gestor"), async (req, res) => {
+// Gestor edita/exclui qualquer material. Consultor só o que ele mesmo criou.
+async function exigirDonoOuGestor(req: RequisicaoAutenticada, res: Response, next: NextFunction) {
+  const material = await prisma.material.findUnique({ where: { id: String(req.params.id) }, select: { criadoPorId: true } });
+  if (!material) throw new ErroHttp(404, "Material não encontrado.");
+  const ehDono = req.usuario!.papel === "gestor" || material.criadoPorId === req.usuario!.id;
+  if (!ehDono) return res.status(403).json({ erro: "Você só pode editar materiais que você mesmo criou." });
+  next();
+}
+
+router.post("/", async (req: RequisicaoAutenticada, res) => {
   const parsed = materialSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ erro: "Informe o título do material." });
   const d = parsed.data;
@@ -102,12 +120,13 @@ router.post("/", exigirPapel("gestor"), async (req, res) => {
       produto: vazioParaNull(d.produto),
       ativo: d.ativo ?? true,
       thumbnailUrl: d.thumbnailUrl ?? null,
+      criadoPorId: req.usuario!.papel === "consultor" ? req.usuario!.id : null,
     },
   });
   res.status(201).json({ material });
 });
 
-router.patch("/:id", exigirPapel("gestor"), async (req, res) => {
+router.patch("/:id", exigirDonoOuGestor, async (req, res) => {
   const parsed = materialSchema.partial().safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ erro: parsed.error.issues[0]?.message ?? "Dados inválidos." });
   const d = parsed.data;
@@ -125,7 +144,7 @@ router.patch("/:id", exigirPapel("gestor"), async (req, res) => {
   res.json({ material });
 });
 
-router.delete("/:id", exigirPapel("gestor"), async (req, res) => {
+router.delete("/:id", exigirDonoOuGestor, async (req, res) => {
   await prisma.material.delete({ where: { id: String(req.params.id) } });
   res.json({ ok: true });
 });
@@ -138,7 +157,7 @@ const slideSchema = z.object({
   secao: z.string().optional(),
 });
 
-router.post("/:id/slides", exigirPapel("gestor"), async (req, res) => {
+router.post("/:id/slides", exigirDonoOuGestor, async (req, res) => {
   const parsed = slideSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ erro: parsed.error.issues[0]?.message ?? "Imagem do slide inválida." });
 
@@ -162,7 +181,7 @@ router.post("/:id/slides", exigirPapel("gestor"), async (req, res) => {
   res.status(201).json({ slide: { id: slide.id, ordem: slide.ordem, titulo: slide.titulo, secao: slide.secao, imagemUrl: slide.imagemUrl } });
 });
 
-router.patch("/:id/slides/:slideId", exigirPapel("gestor"), async (req, res) => {
+router.patch("/:id/slides/:slideId", exigirDonoOuGestor, async (req, res) => {
   const parsed = z.object({ titulo: z.string().optional(), secao: z.string().optional() }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ erro: "Dados inválidos." });
   await prisma.slide.update({
@@ -173,7 +192,7 @@ router.patch("/:id/slides/:slideId", exigirPapel("gestor"), async (req, res) => 
 });
 
 // PUT /materiais/:id/slides/ordem  { ids: [slideId, ...] } na nova ordem
-router.put("/:id/slides/ordem", exigirPapel("gestor"), async (req, res) => {
+router.put("/:id/slides/ordem", exigirDonoOuGestor, async (req, res) => {
   const parsed = z.object({ ids: z.array(z.string()).min(1) }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ erro: "Ordem inválida." });
   const materialId = String(req.params.id);
@@ -181,7 +200,7 @@ router.put("/:id/slides/ordem", exigirPapel("gestor"), async (req, res) => {
   res.json({ ok: true });
 });
 
-router.delete("/:id/slides/:slideId", exigirPapel("gestor"), async (req, res) => {
+router.delete("/:id/slides/:slideId", exigirDonoOuGestor, async (req, res) => {
   await prisma.slide.delete({ where: { id: String(req.params.slideId), materialId: String(req.params.id) } });
   res.json({ ok: true });
 });
