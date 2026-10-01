@@ -97,32 +97,55 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
   const mes = limitesDoMes(agora);
   const trintaDiasAtras = somarDias(agora, -30);
 
-  const [visitasHoje, pendentesDeRelatorio, visitasSemana, medicos, visitasRecentes, ausencias, apresentacoesMes, indicadores] =
-    await Promise.all([
-      prisma.visita.findMany({
-        where: { consultorId, dataHora: { gte: hoje.inicio, lte: hoje.fim } },
-        include: { medicoClinica: true },
-        orderBy: { dataHora: "asc" },
-      }),
-      // Visitas que já passaram e ainda não tiveram o relatório enviado.
-      prisma.visita.findMany({
-        where: { consultorId, dataHora: { lt: agora, gte: somarDias(agora, -60) }, status: { in: ["pendente", "confirmado"] } },
-        include: { medicoClinica: true },
-        orderBy: { dataHora: "asc" },
-      }),
-      prisma.visita.findMany({ where: { consultorId, dataHora: { gte: semana.inicio, lte: semana.fim } }, select: { status: true } }),
-      prisma.medicoClinica.findMany({ orderBy: { nomeMedico: "asc" } }),
-      prisma.visita.findMany({
-        where: { consultorId, status: { not: "cancelado" }, OR: [{ dataHora: { gte: trintaDiasAtras } }] },
-        select: { medicoClinicaId: true, dataHora: true },
-      }),
-      prisma.ausencia.findMany({
-        where: { consultorId, fim: { gte: agora }, inicio: { lte: somarDias(agora, 30) } },
-        orderBy: { inicio: "asc" },
-      }),
-      prisma.registroApresentacao.count({ where: { consultorId, inicio: { gte: mes.inicio, lte: mes.fim } } }),
-      indicadoresDoMes(consultorId, req.usuario!.metaComparecimento),
-    ]);
+  const [
+    visitasHoje,
+    pendentesDeRelatorio,
+    visitasSemana,
+    medicos,
+    visitasRecentes,
+    ultimasVisitasRealizadas,
+    visitasRealizadasNoMes,
+    agendaPendente,
+    ausencias,
+    apresentacoesMes,
+    indicadores,
+  ] = await Promise.all([
+    prisma.visita.findMany({
+      where: { consultorId, dataHora: { gte: hoje.inicio, lte: hoje.fim } },
+      include: { medicoClinica: true },
+      orderBy: { dataHora: "asc" },
+    }),
+    // Visitas que já passaram e ainda não tiveram o relatório enviado.
+    prisma.visita.findMany({
+      where: { consultorId, dataHora: { lt: agora, gte: somarDias(agora, -60) }, status: { in: ["pendente", "confirmado"] } },
+      include: { medicoClinica: true },
+      orderBy: { dataHora: "asc" },
+    }),
+    prisma.visita.findMany({ where: { consultorId, dataHora: { gte: semana.inicio, lte: semana.fim } }, select: { status: true } }),
+    // Carteira do consultor: médicos dele + os ainda sem consultor responsável.
+    prisma.medicoClinica.findMany({
+      where: { OR: [{ consultorId }, { consultorId: null }] },
+      orderBy: { nomeMedico: "asc" },
+    }),
+    prisma.visita.findMany({
+      where: { consultorId, status: { not: "cancelado" }, OR: [{ dataHora: { gte: trintaDiasAtras } }] },
+      select: { medicoClinicaId: true, dataHora: true },
+    }),
+    // Última visita realizada (qualquer época) por médico, para medir há quanto tempo está sem visita.
+    prisma.visita.groupBy({ by: ["medicoClinicaId"], where: { consultorId, status: "realizado" }, _max: { dataHora: true } }),
+    prisma.visita.findMany({
+      where: { consultorId, status: "realizado", dataHora: { gte: mes.inicio, lte: mes.fim } },
+      select: { medicoClinicaId: true },
+    }),
+    // Agenda pendente: total de visitas futuras ainda não realizadas (não só as da semana).
+    prisma.visita.count({ where: { consultorId, status: { in: ["pendente", "confirmado"] }, dataHora: { gte: agora } } }),
+    prisma.ausencia.findMany({
+      where: { consultorId, fim: { gte: agora }, inicio: { lte: somarDias(agora, 30) } },
+      orderBy: { inicio: "asc" },
+    }),
+    prisma.registroApresentacao.count({ where: { consultorId, inicio: { gte: mes.inicio, lte: mes.fim } } }),
+    indicadoresDoMes(consultorId, req.usuario!.metaComparecimento),
+  ]);
 
   const limite = limiteRegistro(agora);
   const alertas = pendentesDeRelatorio.map((v) => {
@@ -147,6 +170,34 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
       motivo: atendeHojeFlag ? "Atende hoje e está sem visita há mais de 30 dias" : "Atende amanhã e está sem visita há mais de 30 dias",
     }));
 
+  // Meta de cobertura: % da carteira (médicos dela já atribuídos a ele; se ainda não tiver
+  // nenhum, usa a carteira disponível — dele + sem dono) visitada (realizado) no mês.
+  const meusMedicos = medicos.filter((m) => m.consultorId === consultorId);
+  const carteira = meusMedicos.length > 0 ? meusMedicos : medicos;
+  const idsCarteira = new Set(carteira.map((m) => m.id));
+  const visitadosNoMes = new Set(visitasRealizadasNoMes.map((v) => v.medicoClinicaId).filter((id) => idsCarteira.has(id)));
+  const totalCarteira = carteira.length;
+  const cobertura = {
+    visitados: visitadosNoMes.size,
+    total: totalCarteira,
+    percentual: totalCarteira > 0 ? Math.round((visitadosNoMes.size / totalCarteira) * 100) : 0,
+    meta: req.usuario!.metaCoberturaMedicos,
+  };
+
+  // Médicos da carteira sem visita realizada nos últimos 30 dias e sem visita futura marcada.
+  const ultimaVisitaPorMedico = new Map<string, Date>();
+  for (const u of ultimasVisitasRealizadas) if (u._max.dataHora) ultimaVisitaPorMedico.set(u.medicoClinicaId, u._max.dataHora);
+  const semVisita = carteira
+    .filter((m) => !comVisitaRecenteOuFutura.has(m.id))
+    .map((m) => {
+      const ultima = ultimaVisitaPorMedico.get(m.id) ?? null;
+      const referencia = ultima ?? m.createdAt;
+      const diasSemVisita = Math.floor((agora.getTime() - referencia.getTime()) / (1000 * 60 * 60 * 24));
+      return { id: m.id, nomeMedico: m.nomeMedico, clinica: m.clinica, bairro: m.bairro, diasSemVisita, nuncaVisitado: !ultima };
+    })
+    .sort((a, b) => b.diasSemVisita - a.diasSemVisita)
+    .slice(0, 10);
+
   res.json({
     hoje: {
       total: visitasHoje.length,
@@ -159,8 +210,11 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
       planejadas: visitasSemana.filter((v) => v.status === "pendente" || v.status === "confirmado").length,
       enviadas: visitasSemana.filter((v) => v.status === "realizado").length,
     },
+    agendaPendente,
     alertas,
     sugestoes,
+    semVisita,
+    cobertura,
     ausencias: ausencias.map(serializarAusencia),
     apresentacoesMes,
     indicadores: { ...indicadores, metaComparecimento: req.usuario!.metaComparecimento },

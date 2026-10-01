@@ -188,6 +188,7 @@ const relatorioSchema = z.object({
   acompanhada: z.boolean().optional(),
   acompanhante: z.string().nullable().optional(),
   feedback: z.string().nullable().optional(),
+  tarefa: z.string().nullable().optional(),
   amostras: z
     .array(z.object({ produto: z.string().min(1), quantidade: z.number().int().min(1).max(999), lote: z.string().nullable().optional() }))
     .optional(),
@@ -228,6 +229,7 @@ async function salvarRelatorio(visita: Awaited<ReturnType<typeof carregarVisita>
         acompanhada: dados.acompanhada,
         acompanhante: dados.acompanhada === false ? null : texto(dados.acompanhante),
         feedback: texto(dados.feedback),
+        tarefa: texto(dados.tarefa),
         relatorioSalvoEm: new Date(),
       },
     });

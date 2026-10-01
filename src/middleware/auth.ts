@@ -12,6 +12,7 @@ export interface RequisicaoAutenticada extends Request {
     telefone: string | null;
     status: "ativo" | "pendente" | "inativo";
     metaComparecimento: number;
+    metaCoberturaMedicos: number;
   };
   sessao?: { jti: string; expiraEm: Date };
 }
@@ -41,6 +42,7 @@ export async function exigirAutenticacao(req: RequisicaoAutenticada, res: Respon
     telefone: usuario.telefone,
     status: usuario.status,
     metaComparecimento: usuario.metaComparecimento,
+    metaCoberturaMedicos: usuario.metaCoberturaMedicos,
   };
   const decoded = jwtDecodeExp(token);
   if (payload.jti && decoded) req.sessao = { jti: payload.jti, expiraEm: decoded };

@@ -56,14 +56,17 @@ model Usuario {
   regiao             String?
   status             StatusUsuario          @default(pendente)
   telefone           String?
-  metaComparecimento Int                    @default(80)
-  createdAt          DateTime               @default(now())
-  updatedAt          DateTime               @updatedAt
-  visitas            Visita[]
-  ausencias          Ausencia[]
-  favoritos          MaterialFavorito[]
-  apresentacoes      RegistroApresentacao[]
-  materiaisCriados   Material[]             @relation("MaterialCriadoPor")
+  metaComparecimento   Int                    @default(80)
+  // Meta de % de médicos da carteira a visitar no mês (ver painel do consultor).
+  metaCoberturaMedicos Int                    @default(80)
+  createdAt            DateTime               @default(now())
+  updatedAt            DateTime               @updatedAt
+  visitas              Visita[]
+  ausencias            Ausencia[]
+  favoritos            MaterialFavorito[]
+  apresentacoes        RegistroApresentacao[]
+  materiaisCriados     Material[]             @relation("MaterialCriadoPor")
+  medicosResponsavel   MedicoClinica[]        @relation("MedicoResponsavel")
 }
 
 model MedicoClinica {
@@ -88,6 +91,10 @@ model MedicoClinica {
   cpf                 String?
   telClinica          String?
   observacao          String?
+  // Nulo = ainda sem consultor responsável (qualquer consultor pode "assumir"). Um médico não
+  // pode ter mais de um consultor ao mesmo tempo (checado nas rotas de criação/edição).
+  consultorId         String?
+  consultor           Usuario?               @relation("MedicoResponsavel", fields: [consultorId], references: [id], onDelete: SetNull)
   createdAt           DateTime               @default(now())
   updatedAt           DateTime               @updatedAt
   visitas             Visita[]
@@ -121,6 +128,8 @@ model Visita {
   foco             String?
   acompanhada      Boolean                @default(false)
   acompanhante     String?
+  // Tarefa/pendência que o consultor anotou a partir dessa visita.
+  tarefa           String?
   relatorioSalvoEm DateTime?
   enviadaEm        DateTime?
   createdAt        DateTime               @default(now())
