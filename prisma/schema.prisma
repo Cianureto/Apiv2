@@ -67,6 +67,7 @@ model Usuario {
   apresentacoes        RegistroApresentacao[]
   materiaisCriados     Material[]             @relation("MaterialCriadoPor")
   medicosResponsavel   MedicoClinica[]        @relation("MedicoResponsavel")
+  importacoesReceitas  ImportacaoReceitas[]   @relation("ImportacaoConsultor")
 }
 
 model MedicoClinica {
@@ -231,4 +232,41 @@ model SessaoRevogada {
   jti       String   @id
   expiraEm  DateTime
   createdAt DateTime @default(now())
+}
+
+// Relatório de receitas por prescritor da farmácia (ex.: "Lista de Pacientes - Sintética" da Farmaland),
+// importado a partir do PDF. Um registro por PDF (visitador + período); reimportar o mesmo período substitui.
+model ImportacaoReceitas {
+  id             String         @id @default(cuid())
+  origem         String         @default("Farmaland")
+  visitador      String
+  periodoInicio  DateTime       @db.Date
+  periodoFim     DateTime       @db.Date
+  arquivoNome    String?
+  totalPacientes Int?
+  // Consultor que corresponde ao visitador do PDF (escolhido na importação).
+  consultorId    String?
+  consultor      Usuario?       @relation("ImportacaoConsultor", fields: [consultorId], references: [id], onDelete: SetNull)
+  criadoPorId    String?
+  createdAt      DateTime       @default(now())
+  linhas         LinhaReceita[]
+
+  @@unique([visitador, periodoInicio, periodoFim])
+}
+
+// Uma linha do relatório: um prescritor no período. O vínculo com MedicoClinica é feito na consulta,
+// pela chave do registro (conselho + número), para pegar também médicos cadastrados depois da importação.
+model LinhaReceita {
+  id            String             @id @default(cuid())
+  importacaoId  String
+  importacao    ImportacaoReceitas @relation(fields: [importacaoId], references: [id], onDelete: Cascade)
+  registro      String
+  chave         String
+  nomeMedico    String
+  receitas      Int
+  formulas      Int
+  valorCentavos Int
+
+  @@index([chave])
+  @@index([importacaoId])
 }
