@@ -155,15 +155,14 @@ function somar(a: Agregado, l: Agregado) {
 
 // GET /receitas/resumo?inicio=YYYY-MM-DD&fim=YYYY-MM-DD&consultorId=&conselho=CRM|CRN
 // Entram no recorte as importações cujo período está inteiro dentro de [inicio, fim].
-// Consultor: só vê as importações ligadas a ele e os prescritores da carteira dele.
-router.get("/resumo", async (req: RequisicaoAutenticada, res) => {
+// Só gestor: tem valores em R$. O consultor usa /carteira, que não expõe valores.
+router.get("/resumo", exigirPapel("gestor"), async (req: RequisicaoAutenticada, res) => {
   const q = z
     .object({ inicio: dataStr, fim: dataStr, consultorId: z.string().optional(), conselho: z.enum(["CRM", "CRN"]).optional() })
     .safeParse(req.query);
   if (!q.success) throw new ErroHttp(400, "Informe o período (inicio e fim no formato AAAA-MM-DD).");
   const { inicio, fim } = q.data;
-  const ehConsultor = req.usuario!.papel === "consultor";
-  const consultorFiltro = ehConsultor ? req.usuario!.id : q.data.consultorId || null;
+  const consultorFiltro = q.data.consultorId || null;
 
   const [importacoes, medicos] = await Promise.all([
     prisma.importacaoReceitas.findMany({ include: { linhas: true }, orderBy: { periodoInicio: "asc" } }),
@@ -326,6 +325,153 @@ router.get("/resumo", async (req: RequisicaoAutenticada, res) => {
       diasRetomada: DIAS_PARA_RETOMADA,
       itens: novos,
     },
+  });
+});
+
+// GET /receitas/carteira?mes=YYYY-MM[&consultorId=] — visão do consultor, sem valores em R$.
+// Separa a carteira em grupos de ação a partir das receitas (quantidade) mês a mês.
+// Consultor: sempre a própria carteira. Gestor: precisa informar consultorId.
+const MESES_SERIE = 6;
+const QUEDA_FRACAO = 0.5; // receitas do mês <= metade da média dos (até) 3 meses anteriores com relatório
+const QUEDA_MEDIA_MINIMA = 2; // ignora quedas em quem quase não prescreve
+
+router.get("/carteira", async (req: RequisicaoAutenticada, res) => {
+  const q = z.object({ mes: z.string().regex(/^\d{4}-\d{2}$/).optional(), consultorId: z.string().optional() }).safeParse(req.query);
+  if (!q.success) throw new ErroHttp(400, "Mês inválido (use AAAA-MM).");
+  const consultorId = req.usuario!.papel === "consultor" ? req.usuario!.id : q.data.consultorId;
+  if (!consultorId) throw new ErroHttp(400, "Informe o consultor.");
+
+  const [importacoes, carteira] = await Promise.all([
+    prisma.importacaoReceitas.findMany({ include: { linhas: { select: { chave: true, registro: true, nomeMedico: true, receitas: true } } } }),
+    prisma.medicoClinica.findMany({
+      where: { consultorId },
+      select: { id: true, nomeMedico: true, especialidade: true, clinica: true, crm: true },
+      orderBy: { nomeMedico: "asc" },
+    }),
+  ]);
+
+  const medicoPorChave = new Map<string, (typeof carteira)[number]>();
+  const semCrm: { id: string; nome: string; clinica: string }[] = [];
+  for (const m of carteira) {
+    const reg = m.crm ? normalizarRegistro(m.crm) : null;
+    if (reg) medicoPorChave.set(reg.chave, m);
+    else semCrm.push({ id: m.id, nome: m.nomeMedico, clinica: m.clinica });
+  }
+
+  // Receitas por prescritor e mês, só das linhas que são do consultor (relatório ligado a ele ou médico da carteira).
+  const porChave = new Map<string, { registro: string; nome: string; meses: Map<string, number> }>();
+  for (const imp of importacoes) {
+    const mes = chaveMes(imp.periodoInicio);
+    for (const l of imp.linhas) {
+      if (imp.consultorId !== consultorId && !medicoPorChave.has(l.chave)) continue;
+      if (!porChave.has(l.chave)) porChave.set(l.chave, { registro: l.registro, nome: l.nomeMedico, meses: new Map() });
+      const p = porChave.get(l.chave)!;
+      p.meses.set(mes, (p.meses.get(mes) ?? 0) + l.receitas);
+    }
+  }
+
+  const mesesDisponiveis = [...new Set([...porChave.values()].flatMap((p) => [...p.meses.keys()]))].sort();
+  const mesRef = q.data.mes && mesesDisponiveis.includes(q.data.mes) ? q.data.mes : mesesDisponiveis[mesesDisponiveis.length - 1];
+  const base = { mesesDisponiveis: mesesDisponiveis.map((m) => ({ chave: m, rotulo: rotuloMes(m) })), carteira: carteira.length, semCrm };
+  if (!mesRef) return res.json({ ...base, mesReferencia: null });
+
+  const [ano, mes] = mesRef.split("-").map(Number);
+  const serieMeses = mesesEntre(strDia(new Date(Date.UTC(ano, mes - MESES_SERIE, 1))), `${mesRef}-01`);
+
+  // Visitas do consultor a esses médicos: última realizada e próxima planejada.
+  const idsCarteira = carteira.map((m) => m.id);
+  const agora = new Date();
+  const [realizadas, planejadas] = idsCarteira.length
+    ? await Promise.all([
+        prisma.visita.groupBy({ by: ["medicoClinicaId"], where: { consultorId, medicoClinicaId: { in: idsCarteira }, status: "realizado" }, _max: { dataHora: true } }),
+        prisma.visita.groupBy({
+          by: ["medicoClinicaId"],
+          where: { consultorId, medicoClinicaId: { in: idsCarteira }, status: { in: ["pendente", "confirmado"] }, dataHora: { gte: agora } },
+          _min: { dataHora: true },
+        }),
+      ])
+    : [[], []];
+  const ultimaVisita = new Map(realizadas.map((v) => [v.medicoClinicaId, v._max.dataHora]));
+  const proximaVisita = new Map(planejadas.map((v) => [v.medicoClinicaId, v._min.dataHora]));
+
+  function item(chave: string) {
+    const p = porChave.get(chave);
+    const medico = medicoPorChave.get(chave) ?? null;
+    const serie = serieMeses.map((m) => p?.meses.get(m) ?? 0);
+    const historico = [...(p?.meses.entries() ?? [])].filter(([m, n]) => m <= mesRef && n > 0).map(([m]) => m).sort();
+    return {
+      chave,
+      registro: p?.registro ?? medico?.crm ?? "",
+      nome: medico?.nomeMedico ?? p?.nome ?? "",
+      especialidade: medico?.especialidade ?? null,
+      medicoId: medico?.id ?? null,
+      naCarteira: !!medico,
+      receitasMes: serie[serie.length - 1],
+      serie,
+      mesesAtivos: serie.filter((n) => n > 0).length,
+      primeiroMes: historico[0] ?? null,
+      ultimoMes: historico[historico.length - 1] ?? null,
+      ultimaVisita: medico ? (ultimaVisita.get(medico.id) ?? null) : null,
+      proximaVisita: medico ? (proximaVisita.get(medico.id) ?? null) : null,
+    };
+  }
+
+  const chaves = new Set([...porChave.keys(), ...medicoPorChave.keys()]);
+  const itens = [...chaves].map(item);
+  // Comparações usam os meses que têm relatório (se faltar o PDF de um mês, ninguém "para" nem "volta" por isso).
+  const idxRef = mesesDisponiveis.indexOf(mesRef);
+  const mesesAnteriores = mesesDisponiveis.slice(Math.max(0, idxRef - 3), idxRef);
+  const mesAnterior = mesesAnteriores[mesesAnteriores.length - 1];
+  const receitasEm = (chave: string, m: string | undefined) => (m ? (porChave.get(chave)?.meses.get(m) ?? 0) : 0);
+
+  // Quem não é da carteira já aparece em "foraDaCarteira".
+  const novos = itens.filter((i) => i.naCarteira && i.receitasMes > 0 && i.primeiroMes === mesRef);
+  const voltaram = itens.filter((i) => i.receitasMes > 0 && i.primeiroMes !== mesRef && !!mesAnterior && receitasEm(i.chave, mesAnterior) === 0);
+
+  type ItemAtencao = ReturnType<typeof item> & { motivo: "parou" | "queda" | "sumiu"; mediaAnterior: number | null };
+  const PRIORIDADE = { parou: 0, queda: 1, sumiu: 2 } as const;
+  const atencao: ItemAtencao[] = [];
+  for (const i of itens) {
+    if (!i.ultimoMes) continue;
+    if (i.receitasMes === 0) {
+      atencao.push({ ...i, motivo: i.ultimoMes === mesAnterior ? "parou" : "sumiu", mediaAnterior: null });
+      continue;
+    }
+    if (!mesesAnteriores.length) continue;
+    const media = mesesAnteriores.reduce((s, m) => s + receitasEm(i.chave, m), 0) / mesesAnteriores.length;
+    if (media >= QUEDA_MEDIA_MINIMA && i.receitasMes <= media * QUEDA_FRACAO) atencao.push({ ...i, motivo: "queda", mediaAnterior: Math.round(media * 10) / 10 });
+  }
+  atencao.sort((a, b) => PRIORIDADE[a.motivo] - PRIORIDADE[b.motivo] || (b.ultimoMes ?? "").localeCompare(a.ultimoMes ?? "") || a.nome.localeCompare(b.nome));
+
+  // Quem está em queda já aparece em "atenção"; não repete entre os constantes.
+  const emAtencao = new Set(atencao.map((i) => i.chave));
+  const constantes = itens
+    .filter((i) => i.receitasMes > 0 && i.primeiroMes !== mesRef && !emAtencao.has(i.chave))
+    .sort((a, b) => b.mesesAtivos - a.mesesAtivos || b.receitasMes - a.receitasMes)
+    .slice(0, 10);
+
+  const semReceita = itens.filter((i) => i.naCarteira && !i.ultimoMes).sort((a, b) => a.nome.localeCompare(b.nome));
+  const ativos = itens.filter((i) => i.receitasMes > 0);
+
+  res.json({
+    ...base,
+    mesReferencia: { chave: mesRef, rotulo: rotuloMes(mesRef) },
+    serieMeses: serieMeses.map(rotuloMes),
+    resumo: {
+      ativos: ativos.length,
+      ativosNaCarteira: ativos.filter((i) => i.naCarteira).length,
+      atencao: atencao.length,
+      voltaram: voltaram.length,
+      novos: novos.length,
+      semReceita: semReceita.length,
+      foraDaCarteira: ativos.filter((i) => !i.naCarteira).length,
+    },
+    atencao,
+    voltaram,
+    constantes,
+    novos,
+    semReceita,
+    foraDaCarteira: ativos.filter((i) => !i.naCarteira).sort((a, b) => b.receitasMes - a.receitasMes),
   });
 });
 
