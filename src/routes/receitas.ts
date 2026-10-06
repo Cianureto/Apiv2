@@ -425,7 +425,9 @@ router.get("/carteira", async (req: RequisicaoAutenticada, res) => {
   const receitasEm = (chave: string, m: string | undefined) => (m ? (porChave.get(chave)?.meses.get(m) ?? 0) : 0);
 
   // Quem não é da carteira já aparece em "foraDaCarteira".
-  const novos = itens.filter((i) => i.naCarteira && i.receitasMes > 0 && i.primeiroMes === mesRef);
+  // Sem mês anterior com relatório não há com o que comparar: ninguém é "novo", "voltou" ou "parou".
+  const comparacao = mesesAnteriores.length > 0;
+  const novos = comparacao ? itens.filter((i) => i.naCarteira && i.receitasMes > 0 && i.primeiroMes === mesRef) : [];
   const voltaram = itens.filter((i) => i.receitasMes > 0 && i.primeiroMes !== mesRef && !!mesAnterior && receitasEm(i.chave, mesAnterior) === 0);
 
   type ItemAtencao = ReturnType<typeof item> & { motivo: "parou" | "queda" | "sumiu"; mediaAnterior: number | null };
@@ -445,9 +447,10 @@ router.get("/carteira", async (req: RequisicaoAutenticada, res) => {
 
   // Quem está em queda já aparece em "atenção"; não repete entre os constantes.
   const emAtencao = new Set(atencao.map((i) => i.chave));
+  // Com comparação: os mais constantes mês após mês. No primeiro mês da base: quem mais prescreveu no mês.
   const constantes = itens
-    .filter((i) => i.receitasMes > 0 && i.primeiroMes !== mesRef && !emAtencao.has(i.chave))
-    .sort((a, b) => b.mesesAtivos - a.mesesAtivos || b.receitasMes - a.receitasMes)
+    .filter((i) => i.receitasMes > 0 && (!comparacao || i.primeiroMes !== mesRef) && !emAtencao.has(i.chave))
+    .sort((a, b) => (comparacao ? b.mesesAtivos - a.mesesAtivos : 0) || b.receitasMes - a.receitasMes)
     .slice(0, 10);
 
   const semReceita = itens.filter((i) => i.naCarteira && !i.ultimoMes).sort((a, b) => a.nome.localeCompare(b.nome));
@@ -456,6 +459,7 @@ router.get("/carteira", async (req: RequisicaoAutenticada, res) => {
   res.json({
     ...base,
     mesReferencia: { chave: mesRef, rotulo: rotuloMes(mesRef) },
+    comparacao,
     serieMeses: serieMeses.map(rotuloMes),
     resumo: {
       ativos: ativos.length,
