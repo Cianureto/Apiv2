@@ -230,6 +230,7 @@ async function salvarRelatorio(visita: Awaited<ReturnType<typeof carregarVisita>
         acompanhante: dados.acompanhada === false ? null : texto(dados.acompanhante),
         feedback: texto(dados.feedback),
         tarefa: texto(dados.tarefa),
+        ...(dados.tarefa !== undefined && !texto(dados.tarefa) ? { tarefaConcluidaEm: null } : {}),
         relatorioSalvoEm: new Date(),
       },
     });
@@ -289,6 +290,21 @@ router.patch("/:id/status", exigirPapel("gestor"), async (req, res) => {
   if (!parsed.success) return res.status(400).json({ erro: "Status inválido." });
   await prisma.visita.update({ where: { id: String(req.params.id) }, data: { status: parsed.data.status } });
   res.json({ ok: true });
+});
+
+// Marca/desmarca como concluída a tarefa anotada no relatório. Vale mesmo com a visita já enviada:
+// a tarefa é um acompanhamento que continua depois do relatório.
+router.patch("/:id/tarefa", exigirPapel("consultor"), async (req: RequisicaoAutenticada, res) => {
+  const parsed = z.object({ concluida: z.boolean() }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ erro: "Informe se a tarefa foi concluída." });
+  const visita = await carregarVisita(req, String(req.params.id));
+  if (!visita.tarefa) throw new ErroHttp(422, "Essa visita não tem tarefa.");
+  const atualizada = await prisma.visita.update({
+    where: { id: visita.id },
+    data: { tarefaConcluidaEm: parsed.data.concluida ? new Date() : null },
+    include: incluirBasico,
+  });
+  res.json({ visita: serializarVisitaGestor(atualizada) });
 });
 
 // Consultor cancela a própria visita (sem apagar, para não distorcer os indicadores).

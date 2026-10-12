@@ -1,28 +1,34 @@
 import { prisma } from "./prisma";
 import { ErroHttp } from "./erros";
-import { chaveDia, limitesDoDia, somarDias } from "./datas";
+import { chaveDia, inicioDoMesDeslocado, limitesDoDia, partesLocais } from "./datas";
 
-/** Quantos dias para trás uma visita ainda pode ser registrada/salva. */
-export const DIAS_LIMITE_REGISTRO = Number(process.env.DIAS_LIMITE_REGISTRO ?? 5);
+/** Fechamento do ciclo: visitas de um mês podem ser registradas até este dia do mês seguinte. */
+export const DIA_FECHAMENTO_CICLO = Number(process.env.DIA_FECHAMENTO_CICLO ?? 5);
+
+const MESES = ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"];
 
 /** Tolerância para enviar uma visita marcada para daqui a pouco (ex.: chegou antes do horário). */
 const TOLERANCIA_FUTURO_MIN = 60;
 
-/** Início do dia mais antigo em que ainda é permitido registrar uma visita. */
+/** Início do dia mais antigo em que ainda é permitido registrar uma visita (1º do mês atual, ou do anterior até o fechamento). */
 export function limiteRegistro(agora = new Date()) {
-  return limitesDoDia(somarDias(agora, -DIAS_LIMITE_REGISTRO)).inicio;
+  return inicioDoMesDeslocado(agora, partesLocais(agora).dia <= DIA_FECHAMENTO_CICLO ? -1 : 0);
 }
 
 /** Dias que faltam para a visita sair da janela de registro (0 = último dia). */
 export function diasRestantesParaRegistro(dataHora: Date, agora = new Date()) {
-  const limiteDaVisita = somarDias(limitesDoDia(dataHora).inicio, DIAS_LIMITE_REGISTRO);
-  const hoje = limitesDoDia(agora).inicio;
-  return Math.round((limiteDaVisita.getTime() - hoje.getTime()) / 86_400_000);
+  const prazo = inicioDoMesDeslocado(dataHora, 1).getTime() + (DIA_FECHAMENTO_CICLO - 1) * 86_400_000;
+  const hoje = limitesDoDia(agora).inicio.getTime();
+  return Math.round((prazo - hoje) / 86_400_000);
 }
 
 export function validarJanelaRegistro(dataHora: Date) {
   if (dataHora < limiteRegistro()) {
-    throw new ErroHttp(422, `Você não pode salvar uma visita ocorrida mais de ${DIAS_LIMITE_REGISTRO} dias antes.`);
+    const mes = partesLocais(dataHora).mes;
+    throw new ErroHttp(
+      422,
+      `O prazo para registrar visitas de ${MESES[mes]} terminou no dia ${DIA_FECHAMENTO_CICLO} de ${MESES[(mes + 1) % 12]}.`,
+    );
   }
 }
 

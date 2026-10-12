@@ -1,8 +1,8 @@
 import { Router } from "express";
 import { prisma } from "../lib/prisma";
-import { inicioDoMesDeslocado, limitesDaSemana, limitesDoDia, limitesDoMes, somarDias } from "../lib/datas";
+import { inicioDoDiaStr, inicioDoMesDeslocado, limitesDaSemana, limitesDoDia, limitesDoMes, partesLocais, somarDias } from "../lib/datas";
 import { atendeAmanha, atendeHoje } from "../lib/horario";
-import { DIAS_LIMITE_REGISTRO, diasRestantesParaRegistro, limiteRegistro } from "../lib/regras";
+import { DIA_FECHAMENTO_CICLO, diasRestantesParaRegistro, limiteRegistro } from "../lib/regras";
 import { serializarVisitaConsultor } from "../lib/serializar";
 import { serializarAusencia } from "./ausencias";
 import { exigirAutenticacao, exigirPapel, RequisicaoAutenticada } from "../middleware/auth";
@@ -41,15 +41,23 @@ router.get("/agenda", async (req: RequisicaoAutenticada, res) => {
   res.json({
     visitas: visitas.map(serializarVisitaConsultor),
     ausencias: ausencias.map(serializarAusencia),
-    diasLimiteRegistro: DIAS_LIMITE_REGISTRO,
+    diaFechamentoCiclo: DIA_FECHAMENTO_CICLO,
   });
 });
 
+// GET /consultor/historico?inicio=AAAA-MM-DD&fim=AAAA-MM-DD (dias locais, inclusivos).
+// Sem parâmetros: últimos 365 dias.
 router.get("/historico", async (req: RequisicaoAutenticada, res) => {
+  const dia = /^\d{4}-\d{2}-\d{2}$/;
+  const inicioStr = typeof req.query.inicio === "string" && dia.test(req.query.inicio) ? req.query.inicio : null;
+  const fimStr = typeof req.query.fim === "string" && dia.test(req.query.fim) ? req.query.fim : null;
+  const inicio = (inicioStr && inicioDoDiaStr(inicioStr)) || somarDias(new Date(), -365);
+  const fim = fimStr ? somarDias(inicioDoDiaStr(fimStr)!, 1) : null;
+
   const visitas = await prisma.visita.findMany({
     where: {
       consultorId: req.usuario!.id,
-      dataHora: { gte: somarDias(new Date(), -365) },
+      dataHora: { gte: inicio, ...(fim ? { lt: fim } : {}) },
       status: { in: ["realizado", "cancelado"] },
     },
     include: { medicoClinica: true },
@@ -104,11 +112,13 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
     medicos,
     visitasRecentes,
     ultimasVisitasRealizadas,
+    proximasVisitas,
     visitasRealizadasNoMes,
     agendaPendente,
     ausencias,
     apresentacoesMes,
     indicadores,
+    tarefasAbertas,
   ] = await Promise.all([
     prisma.visita.findMany({
       where: { consultorId, dataHora: { gte: hoje.inicio, lte: hoje.fim } },
@@ -133,18 +143,29 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
     }),
     // Última visita realizada (qualquer época) por médico, para medir há quanto tempo está sem visita.
     prisma.visita.groupBy({ by: ["medicoClinicaId"], where: { consultorId, status: "realizado" }, _max: { dataHora: true } }),
+    prisma.visita.groupBy({
+      by: ["medicoClinicaId"],
+      where: { consultorId, status: { in: ["pendente", "confirmado"] }, dataHora: { gte: agora } },
+      _min: { dataHora: true },
+    }),
     prisma.visita.findMany({
       where: { consultorId, status: "realizado", dataHora: { gte: mes.inicio, lte: mes.fim } },
       select: { medicoClinicaId: true },
     }),
     // Agenda pendente: total de visitas futuras ainda não realizadas (não só as da semana).
     prisma.visita.count({ where: { consultorId, status: { in: ["pendente", "confirmado"] }, dataHora: { gte: agora } } }),
+    // Ausências do ciclo (mês) atual, inclusive as que já passaram, e as dos próximos 30 dias.
     prisma.ausencia.findMany({
-      where: { consultorId, fim: { gte: agora }, inicio: { lte: somarDias(agora, 30) } },
+      where: { consultorId, fim: { gte: mes.inicio }, inicio: { lte: somarDias(agora, 30) } },
       orderBy: { inicio: "asc" },
     }),
     prisma.registroApresentacao.count({ where: { consultorId, inicio: { gte: mes.inicio, lte: mes.fim } } }),
     indicadoresDoMes(consultorId, req.usuario!.metaComparecimento),
+    prisma.visita.findMany({
+      where: { consultorId, tarefa: { not: null }, tarefaConcluidaEm: null, status: { not: "cancelado" } },
+      include: { medicoClinica: true },
+      orderBy: { dataHora: "desc" },
+    }),
   ]);
 
   const limite = limiteRegistro(agora);
@@ -184,19 +205,39 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
     meta: req.usuario!.metaCoberturaMedicos,
   };
 
-  // Médicos da carteira sem visita realizada nos últimos 30 dias e sem visita futura marcada.
+  // Médicos da carteira sem visita realizada no ciclo (mês) atual. "ciclosSemVisita" conta os meses
+  // seguidos sem visita, incluindo o atual (2 = sem visita neste mês e no anterior); nulo = nunca visitado.
   const ultimaVisitaPorMedico = new Map<string, Date>();
   for (const u of ultimasVisitasRealizadas) if (u._max.dataHora) ultimaVisitaPorMedico.set(u.medicoClinicaId, u._max.dataHora);
+  const proximaVisitaPorMedico = new Map<string, Date>();
+  for (const p of proximasVisitas) if (p._min.dataHora) proximaVisitaPorMedico.set(p.medicoClinicaId, p._min.dataHora);
+  const cicloAtual = partesLocais(agora);
+  const indiceMes = (p: { ano: number; mes: number }) => p.ano * 12 + p.mes;
   const semVisita = carteira
-    .filter((m) => !comVisitaRecenteOuFutura.has(m.id))
+    .filter((m) => !visitadosNoMes.has(m.id))
     .map((m) => {
       const ultima = ultimaVisitaPorMedico.get(m.id) ?? null;
-      const referencia = ultima ?? m.createdAt;
-      const diasSemVisita = Math.floor((agora.getTime() - referencia.getTime()) / (1000 * 60 * 60 * 24));
-      return { id: m.id, nomeMedico: m.nomeMedico, clinica: m.clinica, bairro: m.bairro, diasSemVisita, nuncaVisitado: !ultima };
+      return {
+        id: m.id,
+        nomeMedico: m.nomeMedico,
+        especialidade: m.especialidade,
+        clinica: m.clinica,
+        bairro: m.bairro,
+        ultimaVisitaEm: ultima?.toISOString() ?? null,
+        proximaVisitaEm: proximaVisitaPorMedico.get(m.id)?.toISOString() ?? null,
+        ciclosSemVisita: ultima ? indiceMes(cicloAtual) - indiceMes(partesLocais(ultima)) : null,
+        nuncaVisitado: !ultima,
+      };
     })
-    .sort((a, b) => b.diasSemVisita - a.diasSemVisita)
-    .slice(0, 10);
+    .sort((a, b) => (b.ciclosSemVisita ?? Infinity) - (a.ciclosSemVisita ?? Infinity) || a.nomeMedico.localeCompare(b.nomeMedico));
+
+  const tarefas = tarefasAbertas.map((v) => ({
+    visitaId: v.id,
+    tarefa: v.tarefa!,
+    dataHora: v.dataHora.toISOString(),
+    medico: v.medicoClinica.nomeMedico,
+    clinica: v.medicoClinica.clinica,
+  }));
 
   res.json({
     hoje: {
@@ -212,13 +253,14 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
     },
     agendaPendente,
     alertas,
+    tarefas,
     sugestoes,
     semVisita,
     cobertura,
     ausencias: ausencias.map(serializarAusencia),
     apresentacoesMes,
     indicadores: { ...indicadores, metaComparecimento: req.usuario!.metaComparecimento },
-    diasLimiteRegistro: DIAS_LIMITE_REGISTRO,
+    diaFechamentoCiclo: DIA_FECHAMENTO_CICLO,
   });
 });
 

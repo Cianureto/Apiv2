@@ -78,9 +78,19 @@ model MedicoClinica {
   bairro              String
   padraoHorario       String
   nivelRelacionamento String?                @default("novo")
-  // Dados de contato (tela "Contas")
+  // Profissional: medico, nutricionista, farmaceutico, educador_fisico, fisioterapeuta, esteticista, clinica, academia.
+  profissao           String?
+  // Registro no conselho (CRM, CRN, CRF...). "crm" guarda o registro já formatado ("CRN-CE 16459"),
+  // usado para exibir e para ligar às receitas; um registro só pode ter um consultor responsável.
+  conselho            String?
+  conselhoUf          String?
+  registroNumero      String?
   crm                 String?
+  // Dados de contato e endereço (tela "Contas"). Cada linha é um endereço/local de atendimento;
+  // os endereços do mesmo profissional compartilham o grupoId.
+  grupoId             String?
   endereco            String?
+  complemento         String?
   cidade              String?
   uf                  String?
   cep                 String?
@@ -100,6 +110,9 @@ model MedicoClinica {
   updatedAt           DateTime               @updatedAt
   visitas             Visita[]
   apresentacoes       RegistroApresentacao[]
+
+  @@index([grupoId])
+  @@index([conselho, conselhoUf, registroNumero])
 }
 
 model Produto {
@@ -130,7 +143,8 @@ model Visita {
   acompanhada      Boolean                @default(false)
   acompanhante     String?
   // Tarefa/pendência que o consultor anotou a partir dessa visita.
-  tarefa           String?
+  tarefa            String?
+  tarefaConcluidaEm DateTime?
   relatorioSalvoEm DateTime?
   enviadaEm        DateTime?
   createdAt        DateTime               @default(now())

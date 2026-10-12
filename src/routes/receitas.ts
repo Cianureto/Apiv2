@@ -15,11 +15,14 @@ const MESES_CURTOS = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "s
 const DIAS_PARA_RETOMADA = 84;
 const MESES_TENDENCIA = 6;
 
+// Ordem importa: CREFITO antes de CREF. Sem conselho reconhecível, assume CRM (formato antigo dos PDFs).
+const CONSELHOS = ["CREFITO", "CREF", "CRM", "CRN", "CRF", "CRP", "CRO", "CRBM"];
+
 /** "CRN-CE-000017791", "CRM 7834/CE", "crm-ce 7834" -> { chave: "CRM-7834", registro: "CRM-CE 7834" }. */
 export function normalizarRegistro(bruto: string) {
   const texto = bruto.toUpperCase();
-  const conselho = /CRN/.test(texto) ? "CRN" : "CRM";
-  const uf = /\b(?:CR[MN])[\s/-]*([A-Z]{2})\b/.exec(texto)?.[1] ?? /\/([A-Z]{2})\b/.exec(texto)?.[1] ?? null;
+  const conselho = CONSELHOS.find((c) => new RegExp(`\\b${c}`).test(texto)) ?? "CRM";
+  const uf = new RegExp(`\\b${conselho}[\\s/-]*([A-Z]{2})\\b`).exec(texto)?.[1] ?? /\/([A-Z]{2})\b/.exec(texto)?.[1] ?? null;
   const digitos = texto.replace(/\D/g, "").replace(/^0+/, "");
   if (!digitos) return null;
   return { chave: `${conselho}-${digitos}`, registro: `${conselho}${uf ? `-${uf}` : ""} ${digitos}` };
@@ -155,14 +158,16 @@ function somar(a: Agregado, l: Agregado) {
 
 // GET /receitas/resumo?inicio=YYYY-MM-DD&fim=YYYY-MM-DD&consultorId=&conselho=CRM|CRN
 // Entram no recorte as importações cujo período está inteiro dentro de [inicio, fim].
-// Só gestor: tem valores em R$. O consultor usa /carteira, que não expõe valores.
-router.get("/resumo", exigirPapel("gestor"), async (req: RequisicaoAutenticada, res) => {
+// Gestor: qualquer consultor (ou todos). Consultor: sempre só a própria carteira — pode ver, mas a
+// exportação e a importação são exclusivas do gestor.
+router.get("/resumo", async (req: RequisicaoAutenticada, res) => {
   const q = z
     .object({ inicio: dataStr, fim: dataStr, consultorId: z.string().optional(), conselho: z.enum(["CRM", "CRN"]).optional() })
     .safeParse(req.query);
   if (!q.success) throw new ErroHttp(400, "Informe o período (inicio e fim no formato AAAA-MM-DD).");
   const { inicio, fim } = q.data;
-  const consultorFiltro = q.data.consultorId || null;
+  const ehConsultor = req.usuario!.papel === "consultor";
+  const consultorFiltro = ehConsultor ? req.usuario!.id : q.data.consultorId || null;
 
   const [importacoes, medicos] = await Promise.all([
     prisma.importacaoReceitas.findMany({ include: { linhas: true }, orderBy: { periodoInicio: "asc" } }),
@@ -245,7 +250,13 @@ router.get("/resumo", exigirPapel("gestor"), async (req: RequisicaoAutenticada, 
         percValor: total.valorCentavos ? p.valorCentavos / total.valorCentavos : 0,
         tendencia: tendencia.get(p.chave) ?? mesesTendencia.map(() => 0),
         medico: medico
-          ? { id: medico.id, nome: medico.nomeMedico, especialidade: medico.especialidade, consultor: medico.consultor?.nome ?? null }
+          ? {
+              id: medico.id,
+              nome: medico.nomeMedico,
+              especialidade: medico.especialidade,
+              // Para o consultor, não revela quem é o responsável por médicos de outras carteiras.
+              consultor: ehConsultor && medico.consultorId !== consultorFiltro ? (medico.consultorId ? "Outro consultor" : null) : (medico.consultor?.nome ?? null),
+            }
           : null,
         visitasNoRecorte: visita?.quantidade ?? 0,
         ultimaVisita: visita?.ultima ?? null,

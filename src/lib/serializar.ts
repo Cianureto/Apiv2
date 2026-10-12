@@ -14,6 +14,7 @@ function camposRelatorio(v: Visita) {
     acompanhada: v.acompanhada,
     acompanhante: v.acompanhante,
     tarefa: v.tarefa,
+    tarefaConcluidaEm: v.tarefaConcluidaEm?.toISOString() ?? null,
     relatorioSalvoEm: v.relatorioSalvoEm?.toISOString() ?? null,
     enviadaEm: v.enviadaEm?.toISOString() ?? null,
   };
