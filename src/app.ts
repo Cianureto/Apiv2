@@ -21,6 +21,8 @@ app.set("trust proxy", 1);
 const ORIGENS_PERMITIDAS = [
   "http://localhost:5173",
   "https://connectland-app.vercel.app",
+  "https://dhmsolutions.com.br",
+  "https://www.dhmsolutions.com.br",
   ...(process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN.split(",").map((o) => o.trim()) : []),
 ];
 
