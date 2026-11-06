@@ -34,12 +34,13 @@ export type FaixaContatos = "0" | "1" | "2" | "3" | "4+" | "2+" | "1+";
 export type FiltrosVisao = {
   /** Ciclos "YYYY-MM" somados no recorte; vazio = ciclo atual. */
   meses?: string[];
-  consultorId?: string;
-  especialidade?: string;
-  tipo?: "profissional" | "estabelecimento";
-  modalidade?: "presencial" | "video";
-  cidade?: string;
-  contatos?: FaixaContatos;
+  // Cada filtro aceita várias opções (vale qualquer uma delas); vazio = sem filtro.
+  consultores?: string[];
+  especialidades?: string[];
+  tipos?: ("profissional" | "estabelecimento")[];
+  modalidades?: ("presencial" | "video")[];
+  cidades?: string[];
+  contatos?: FaixaContatos[];
   busca?: string;
 };
 
@@ -110,7 +111,7 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
       select: { id: true, grupoId: true, nomeMedico: true, especialidade: true, profissao: true, cidade: true, contatosCiclo: true, consultorId: true },
     }),
     prisma.visita.findMany({
-      where: { status: "realizado", dataHora: { gte: inicio, lte: fim }, ...(f.consultorId ? { consultorId: f.consultorId } : {}) },
+      where: { status: "realizado", dataHora: { gte: inicio, lte: fim }, ...(f.consultores?.length ? { consultorId: { in: f.consultores } } : {}) },
       select: { dataHora: true, canal: true, tipo: true, consultorId: true, medicoClinica: { select: { id: true, grupoId: true } } },
     }),
   ]);
@@ -132,12 +133,12 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
 
   const busca = f.busca ? normalizar(f.busca) : "";
   const confere = (p: Profissional) =>
-    (!f.especialidade || p.especialidade === f.especialidade) &&
-    (!f.tipo || p.estabelecimento === (f.tipo === "estabelecimento")) &&
-    (!f.cidade || p.cidade === f.cidade) &&
+    (!f.especialidades?.length || f.especialidades.includes(p.especialidade)) &&
+    (!f.tipos?.length || f.tipos.includes(p.estabelecimento ? "estabelecimento" : "profissional")) &&
+    (!f.cidades?.length || f.cidades.includes(p.cidade)) &&
     (!busca || normalizar(p.nome).includes(busca));
 
-  let painel = [...profissionais.values()].filter((p) => confere(p) && (!f.consultorId || p.consultorId === f.consultorId));
+  let painel = [...profissionais.values()].filter((p) => confere(p) && (!f.consultores?.length || (p.consultorId !== null && f.consultores.includes(p.consultorId))));
 
   // Visitas do recorte, por profissional.
   type Contagem = { n: number; presencial: number; video: number };
@@ -148,7 +149,7 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
     const p = profissionais.get(k);
     if (!p || !confere(p)) continue;
     const presencial = ehPresencial(v);
-    if (f.modalidade && presencial !== (f.modalidade === "presencial")) continue;
+    if (f.modalidades?.length && !f.modalidades.includes(presencial ? "presencial" : "video")) continue;
     const mes = chaveMes(v.dataHora);
     if (!noRecorte.has(mes)) continue;
     const pl = partesLocais(v.dataHora);
@@ -163,11 +164,13 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
   }
 
   // Filtro "contatos no ciclo": mantém só quem está na faixa (inclusive os não visitados, na faixa 0).
-  if (f.contatos) {
+  if (f.contatos?.length) {
+    const faixas = f.contatos;
     const n = (k: string) => porProfissional.get(k)?.n ?? 0;
-    painel = painel.filter((p) => naFaixa(n(p.chave), f.contatos));
-    doRecorte = doRecorte.filter((v) => naFaixa(n(v.chave), f.contatos));
-    for (const k of [...porProfissional.keys()]) if (!naFaixa(n(k), f.contatos)) porProfissional.delete(k);
+    const confereFaixa = (k: string) => faixas.some((faixa) => naFaixa(n(k), faixa));
+    painel = painel.filter((p) => confereFaixa(p.chave));
+    doRecorte = doRecorte.filter((v) => confereFaixa(v.chave));
+    for (const k of [...porProfissional.keys()]) if (!confereFaixa(k)) porProfissional.delete(k);
   }
 
   const feitas = (k: string) => porProfissional.get(k)?.n ?? 0;

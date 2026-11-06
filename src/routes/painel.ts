@@ -43,20 +43,24 @@ router.get("/kpis", async (_req, res) => {
   });
 });
 
-const vazioComoAusente = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
+// Listas em query string: parâmetro repetido (?x=a&x=b) ou, para códigos sem vírgula, "a,b,c".
+// Nomes (especialidade, cidade) podem ter vírgula, então só vêm como parâmetro repetido.
+const comoLista = (v: unknown, separarVirgula: boolean) => {
+  const itens = (Array.isArray(v) ? v : [v]).filter((x): x is string => typeof x === "string");
+  const lista = (separarVirgula ? itens.flatMap((x) => x.split(",")) : itens).map((x) => x.trim()).filter(Boolean);
+  return lista.length ? lista : undefined;
+};
+const lista = <T extends z.ZodTypeAny>(item: T, separarVirgula = true) =>
+  z.preprocess((v) => comoLista(v, separarVirgula), z.array(item).max(200).optional());
 const filtrosSchema = z.object({
-  // "2026-09,2026-10,2026-11": um ou mais ciclos somados.
-  meses: z.preprocess(
-    (v) => (typeof v === "string" && v.trim() ? v.split(",").map((m) => m.trim()) : undefined),
-    z.array(z.string().regex(/^\d{4}-\d{2}$/)).max(24).optional(),
-  ),
-  consultorId: z.preprocess(vazioComoAusente, z.string().max(64).optional()),
-  especialidade: z.preprocess(vazioComoAusente, z.string().max(200).optional()),
-  tipo: z.preprocess(vazioComoAusente, z.enum(["profissional", "estabelecimento"]).optional()),
-  modalidade: z.preprocess(vazioComoAusente, z.enum(["presencial", "video"]).optional()),
-  cidade: z.preprocess(vazioComoAusente, z.string().max(200).optional()),
-  contatos: z.preprocess(vazioComoAusente, z.enum(["0", "1", "2", "3", "4+", "2+", "1+"]).optional()),
-  busca: z.preprocess(vazioComoAusente, z.string().max(200).optional()),
+  meses: lista(z.string().regex(/^\d{4}-\d{2}$/)),
+  consultores: lista(z.string().max(64)),
+  especialidades: lista(z.string().max(200), false),
+  tipos: lista(z.enum(["profissional", "estabelecimento"])),
+  modalidades: lista(z.enum(["presencial", "video"])),
+  cidades: lista(z.string().max(200), false),
+  contatos: lista(z.enum(["0", "1", "2", "3", "4+", "2+", "1+"])),
+  busca: z.preprocess((v) => (typeof v === "string" && v.trim() ? v : undefined), z.string().max(200).optional()),
 });
 
 // Visão geral do ciclo: cadastro, meta e cobertura de contatos, alcance da carteira e média por dia útil.
@@ -73,8 +77,8 @@ router.get("/visao-geral/opcoes", async (_req, res) => {
 // Tarefas anotadas pelos consultores nos relatórios: as pendentes (mais antigas primeiro) e quantas
 // foram concluídas hoje. Só leitura: quem conclui é o consultor.
 router.get("/tarefas", async (req, res) => {
-  const consultorId = typeof req.query.consultorId === "string" && req.query.consultorId ? req.query.consultorId : undefined;
-  const doConsultor = consultorId ? { consultorId } : {};
+  const consultores = comoLista(req.query.consultores, true)?.slice(0, 200) ?? [];
+  const doConsultor = consultores.length ? { consultorId: { in: consultores } } : {};
   const { inicio, fim } = limitesDoDia(new Date());
   const [pendentes, concluidasHoje] = await Promise.all([
     prisma.visita.findMany({
