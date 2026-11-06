@@ -3,6 +3,7 @@ import { prisma } from "../lib/prisma";
 import { diaDaSemana, inicioDoMesDeslocado, limitesDoDia, limitesDaSemana, limitesDoMes, partesLocais, somarDias } from "../lib/datas";
 import { diasDaSemana } from "../lib/horario";
 import { serializarVisitaGestor as serializarVisita } from "../lib/serializar";
+import { execucaoDoCiclo } from "../lib/ciclo";
 import { exigirAutenticacao, exigirPapel, RequisicaoAutenticada } from "../middleware/auth";
 
 const MESES_CURTOS = ["jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez"];
@@ -39,6 +40,13 @@ router.get("/kpis", async (_req, res) => {
     consultoresEmCampo: consultoresComVisitaHoje.size,
     totalConsultoresAtivos: consultoresAtivos.length,
   });
+});
+
+// Cadastro (profissionais e estabelecimentos) e execução do ciclo atual: meta de contatos,
+// cobertura e média por dia útil. `consultorId` restringe à carteira e às visitas de um consultor.
+router.get("/ciclo", async (req: RequisicaoAutenticada, res) => {
+  const consultorId = typeof req.query.consultorId === "string" && req.query.consultorId ? req.query.consultorId : undefined;
+  res.json(await execucaoDoCiclo(consultorId));
 });
 
 router.get("/agenda", async (req: RequisicaoAutenticada, res) => {

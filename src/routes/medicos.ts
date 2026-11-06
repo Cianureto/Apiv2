@@ -8,6 +8,7 @@ import { ErroHttp } from "../lib/erros";
 import { serializarVisitaGestor } from "../lib/serializar";
 import { LISTA_PROFISSOES, UFS, conselhoDaProfissao, formatarRegistro, normalizarNumeroRegistro } from "../lib/profissional";
 import { exigirAutenticacao, RequisicaoAutenticada } from "../middleware/auth";
+import { chaveProfissional, contatosFeitosNoCiclo } from "../lib/ciclo";
 
 const router = Router();
 router.use(exigirAutenticacao);
@@ -39,7 +40,9 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
 
   const ultima = new Map<string, Date>();
   const proxima = new Map<string, Date>();
+  let feitosNoCiclo = new Map<string, number>();
   if (ehConsultor) {
+    feitosNoCiclo = await contatosFeitosNoCiclo(req.usuario!.id);
     const agora = new Date();
     const [enviadas, futuras] = await Promise.all([
       prisma.visita.groupBy({ by: ["medicoClinicaId"], where: { consultorId: req.usuario!.id, status: "realizado" }, _max: { dataHora: true } }),
@@ -60,6 +63,8 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
     amanha: atendeAmanha(m.padraoHorario),
     ultimaVisitaEm: ultima.get(m.id)?.toISOString() ?? null,
     proximaVisitaEm: proxima.get(m.id)?.toISOString() ?? null,
+    // Visitas realizadas pelo consultor neste ciclo, somando todos os endereços do profissional.
+    contatosFeitosNoCiclo: ehConsultor ? (feitosNoCiclo.get(chaveProfissional(m)) ?? 0) : null,
   }));
 
   const especialidadesExistentes = Array.from(new Set(medicos.map((m) => m.especialidade).filter(Boolean)));
@@ -287,6 +292,7 @@ router.post("/:id/enderecos", exigirDonoOuGestorMedico, async (req: RequisicaoAu
         especialidade: base.especialidade,
         email: base.email,
         celMedico: base.celMedico,
+        contatosCiclo: base.contatosCiclo,
         ...dadosEndereco(parsed.data),
         grupoId,
         consultorId,
@@ -314,6 +320,27 @@ router.patch("/:id", exigirDonoOuGestorMedico, async (req: RequisicaoAutenticada
     return tx.medicoClinica.update({ where: { id: atual.id }, data: endereco });
   });
   res.json({ medico });
+});
+
+const contatosSchema = z.object({
+  contatosCiclo: z.number({ message: "Informe a quantidade de contatos." }).int().min(1, "O mínimo é 1 contato por ciclo.").max(20, "O máximo é 20 contatos por ciclo."),
+});
+
+// PATCH /medicos/:id/contatos — quantos contatos o consultor planeja ter com o profissional por ciclo
+// (1 = só a primeira visita). Quem decide é o consultor responsável; vale para todos os endereços.
+router.patch("/:id/contatos", async (req: RequisicaoAutenticada, res) => {
+  const parsed = contatosSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ erro: primeiraMensagem(parsed.error) });
+  const medico = await prisma.medicoClinica.findUnique({ where: { id: String(req.params.id) }, select: { id: true, grupoId: true, consultorId: true } });
+  if (!medico) throw new ErroHttp(404, "Médico não encontrado.");
+  if (req.usuario!.papel !== "consultor" || medico.consultorId !== req.usuario!.id) {
+    const erro = medico.consultorId === null
+      ? "Assuma o profissional (editar cadastro) antes de definir os contatos do ciclo."
+      : "Só o consultor responsável define os contatos do ciclo.";
+    return res.status(403).json({ erro });
+  }
+  await prisma.medicoClinica.updateMany({ where: filtroGrupo(medico), data: { contatosCiclo: parsed.data.contatosCiclo } });
+  res.json({ contatosCiclo: parsed.data.contatosCiclo });
 });
 
 router.delete("/:id", exigirDonoOuGestorMedico, async (req, res) => {
