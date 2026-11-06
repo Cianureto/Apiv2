@@ -81,7 +81,8 @@ model MedicoClinica {
   // Contatos que o consultor planeja ter com o profissional em cada ciclo (mês): 1 = só a primeira
   // visita; 4 = primeira + 3 revisitas, o máximo. É do profissional, igual em todos os endereços dele.
   contatosCiclo       Int                    @default(1)
-  // Profissional: medico, nutricionista, farmaceutico, educador_fisico, fisioterapeuta, esteticista, clinica, academia.
+  // Profissional: medico, nutricionista, farmaceutico, educador_fisico, fisioterapeuta, dentista, biomedico,
+  // enfermeiro, veterinario, psicologo, esteticista, clinica, academia (lista em src/lib/profissional.ts).
   profissao           String?
   // Registro no conselho (CRM, CRN, CRF...). "crm" guarda o registro já formatado ("CRN-CE 16459"),
   // usado para exibir e para ligar às receitas; um registro só pode ter um consultor responsável.

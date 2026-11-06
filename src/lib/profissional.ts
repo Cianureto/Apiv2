@@ -6,7 +6,13 @@ export const PROFISSOES = {
   farmaceutico: { rotulo: "Farmacêutico(a)", conselho: "CRF" },
   educador_fisico: { rotulo: "Educador(a) físico(a)", conselho: "CREF" },
   fisioterapeuta: { rotulo: "Fisioterapeuta", conselho: "CREFITO" },
-  esteticista: { rotulo: "Esteticista", conselho: null },
+  dentista: { rotulo: "Dentista", conselho: "CRO" },
+  biomedico: { rotulo: "Biomédico(a)", conselho: "CRBM" },
+  enfermeiro: { rotulo: "Enfermeiro(a)", conselho: "COREN" },
+  veterinario: { rotulo: "Veterinário(a)", conselho: "CRMV" },
+  psicologo: { rotulo: "Psicólogo(a)", conselho: "CRP" },
+  // ANEC não é conselho de classe, mas é o registro que aparece nas receitas das esteticistas.
+  esteticista: { rotulo: "Esteticista", conselho: "ANEC" },
   clinica: { rotulo: "Clínica", conselho: null },
   academia: { rotulo: "Academia", conselho: null },
 } as const;
