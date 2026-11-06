@@ -50,22 +50,22 @@ export function feriadosDoAno(ano: number) {
 }
 
 /**
- * Dias úteis do mês de `referencia`: total, quantos já passaram (incluindo hoje, se for útil) e
- * quantos faltam. Num mês já encerrado, todos contam como transcorridos.
+ * Dias úteis do mês de `referencia` ("YYYY-MM-DD" em `lista`): total, quantos já passaram (incluindo
+ * hoje, se for útil) e quantos faltam. Num mês já encerrado, todos contam como transcorridos.
  */
 export function diasUteisDoMes(referencia: Date, agora = new Date()) {
   const { ano, mes } = partesLocais(referencia);
   const hoje = chaveDia(agora);
   const feriados = feriadosDoAno(ano);
   const ultimoDia = new Date(Date.UTC(ano, mes + 1, 0)).getUTCDate();
-  let total = 0;
+  const lista: string[] = [];
   let transcorridos = 0;
   for (let dia = 1; dia <= ultimoDia; dia++) {
     const diaSemana = new Date(Date.UTC(ano, mes, dia)).getUTCDay();
     const k = chave(ano, mes, dia);
     if (diaSemana === 0 || diaSemana === 6 || feriados.has(k)) continue;
-    total++;
+    lista.push(k);
     if (k <= hoje) transcorridos++;
   }
-  return { total, transcorridos, restantes: total - transcorridos };
+  return { total: lista.length, transcorridos, restantes: lista.length - transcorridos, lista };
 }
