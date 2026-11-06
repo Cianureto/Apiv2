@@ -45,7 +45,11 @@ router.get("/kpis", async (_req, res) => {
 
 const vazioComoAusente = (v: unknown) => (typeof v === "string" && v.trim() === "" ? undefined : v);
 const filtrosSchema = z.object({
-  mes: z.preprocess(vazioComoAusente, z.string().regex(/^\d{4}-\d{2}$/).optional()),
+  // "2026-09,2026-10,2026-11": um ou mais ciclos somados.
+  meses: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() ? v.split(",").map((m) => m.trim()) : undefined),
+    z.array(z.string().regex(/^\d{4}-\d{2}$/)).max(24).optional(),
+  ),
   consultorId: z.preprocess(vazioComoAusente, z.string().max(64).optional()),
   especialidade: z.preprocess(vazioComoAusente, z.string().max(200).optional()),
   tipo: z.preprocess(vazioComoAusente, z.enum(["profissional", "estabelecimento"]).optional()),
@@ -64,6 +68,33 @@ router.get("/visao-geral", async (req, res) => {
 
 router.get("/visao-geral/opcoes", async (_req, res) => {
   res.json(await opcoesVisaoGeral());
+});
+
+// Tarefas anotadas pelos consultores nos relatórios: as pendentes (mais antigas primeiro) e quantas
+// foram concluídas hoje. Só leitura: quem conclui é o consultor.
+router.get("/tarefas", async (req, res) => {
+  const consultorId = typeof req.query.consultorId === "string" && req.query.consultorId ? req.query.consultorId : undefined;
+  const doConsultor = consultorId ? { consultorId } : {};
+  const { inicio, fim } = limitesDoDia(new Date());
+  const [pendentes, concluidasHoje] = await Promise.all([
+    prisma.visita.findMany({
+      where: { ...doConsultor, tarefa: { not: null }, tarefaConcluidaEm: null, status: { not: "cancelado" } },
+      include: { consultor: { select: { id: true, nome: true } }, medicoClinica: { select: { nomeMedico: true, clinica: true } } },
+      orderBy: { dataHora: "asc" },
+    }),
+    prisma.visita.count({ where: { ...doConsultor, tarefa: { not: null }, tarefaConcluidaEm: { gte: inicio, lte: fim } } }),
+  ]);
+  res.json({
+    pendentes: pendentes.map((v) => ({
+      visitaId: v.id,
+      tarefa: v.tarefa!,
+      dataHora: v.dataHora.toISOString(),
+      medico: v.medicoClinica.nomeMedico,
+      clinica: v.medicoClinica.clinica,
+      consultor: v.consultor,
+    })),
+    concluidasHoje,
+  });
 });
 
 router.get("/agenda", async (req: RequisicaoAutenticada, res) => {

@@ -323,7 +323,7 @@ router.patch("/:id", exigirDonoOuGestorMedico, async (req: RequisicaoAutenticada
 });
 
 const contatosSchema = z.object({
-  contatosCiclo: z.number({ message: "Informe a quantidade de contatos." }).int().min(1, "O mínimo é 1 contato por ciclo.").max(20, "O máximo é 20 contatos por ciclo."),
+  contatosCiclo: z.number({ message: "Informe a quantidade de contatos." }).int().min(1, "O mínimo é 1 contato por ciclo.").max(4, "O máximo é 4 contatos por ciclo (primeira visita + 3 revisitas)."),
 });
 
 // PATCH /medicos/:id/contatos — quantos contatos o consultor planeja ter com o profissional por ciclo

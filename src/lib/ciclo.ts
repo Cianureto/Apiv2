@@ -32,8 +32,8 @@ export function ehPresencial(v: { canal: CanalVisita | null; tipo: TipoVisita | 
 export type FaixaContatos = "0" | "1" | "2" | "3" | "4+" | "2+" | "1+";
 
 export type FiltrosVisao = {
-  /** "YYYY-MM"; vazio = ciclo atual. */
-  mes?: string;
+  /** Ciclos "YYYY-MM" somados no recorte; vazio = ciclo atual. */
+  meses?: string[];
   consultorId?: string;
   especialidade?: string;
   tipo?: "profissional" | "estabelecimento";
@@ -80,16 +80,30 @@ type Profissional = {
 };
 
 /**
- * Visão geral do ciclo (mês) para o gestor. Cada profissional da carteira tem uma meta de contatos
- * (1 = só a primeira visita; 4 = primeira + 3 revisitas). A meta do ciclo é a soma dessas metas e a
- * cobertura de contatos conta, de cada profissional, no máximo o alocado: visitar demais um médico
- * não compensa outro que ficou sem visita. Só visitas realizadas contam; médias usam dias úteis.
+ * Visão geral de um ou mais ciclos (meses) para o gestor. Cada profissional da carteira tem uma meta
+ * de contatos por ciclo (1 = só a primeira visita; 4 = primeira + 3 revisitas). A meta do recorte é a
+ * soma dessas metas em cada ciclo, e a cobertura de contatos conta, de cada profissional e em cada
+ * ciclo, no máximo o alocado: visitar demais um médico (ou um mês) não compensa outro que ficou sem
+ * visita. A 1ª visita de cada ciclo é a primeira; as demais, revisitas. Só visitas realizadas contam;
+ * médias usam dias úteis.
  */
 async function calcularCiclo(f: FiltrosVisao, agora: Date) {
-  const mes = f.mes ?? chaveMes(agora);
-  const referencia = new Date(`${mes}-15T12:00:00${FUSO}`);
-  const { inicio, fim } = limitesDoMes(referencia);
-  const dias = diasUteisDoMes(referencia, agora);
+  const atual = chaveMes(agora);
+  const meses = f.meses?.length ? [...new Set(f.meses)].sort() : [atual];
+  const doMes = meses.map((m) => {
+    const referencia = new Date(`${m}-15T12:00:00${FUSO}`);
+    return { mes: m, ...limitesDoMes(referencia), dias: diasUteisDoMes(referencia, agora) };
+  });
+  const inicio = doMes[0].inicio;
+  const fim = doMes[doMes.length - 1].fim;
+  const dias = {
+    total: doMes.reduce((t, m) => t + m.dias.total, 0),
+    transcorridos: doMes.reduce((t, m) => t + m.dias.transcorridos, 0),
+    // Dias que ainda dá para trabalhar: só os do ciclo atual, se ele estiver no recorte.
+    restantes: doMes.find((m) => m.mes === atual)?.dias.restantes ?? 0,
+    lista: doMes.flatMap((m) => m.dias.lista),
+  };
+  const noRecorte = new Set(meses);
 
   const [cadastros, visitas] = await Promise.all([
     prisma.medicoClinica.findMany({
@@ -128,15 +142,17 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
   // Visitas do recorte, por profissional.
   type Contagem = { n: number; presencial: number; video: number };
   const porProfissional = new Map<string, Contagem>();
-  let doRecorte: { chave: string; dia: string; presencial: boolean; consultorId: string }[] = [];
+  let doRecorte: { chave: string; mes: string; dia: string; presencial: boolean; consultorId: string }[] = [];
   for (const v of visitas) {
     const k = chaveProfissional(v.medicoClinica);
     const p = profissionais.get(k);
     if (!p || !confere(p)) continue;
     const presencial = ehPresencial(v);
     if (f.modalidade && presencial !== (f.modalidade === "presencial")) continue;
+    const mes = chaveMes(v.dataHora);
+    if (!noRecorte.has(mes)) continue;
     const pl = partesLocais(v.dataHora);
-    doRecorte.push({ chave: k, dia: `${pl.ano}-${String(pl.mes + 1).padStart(2, "0")}-${String(pl.dia).padStart(2, "0")}`, presencial, consultorId: v.consultorId });
+    doRecorte.push({ chave: k, mes, dia: `${mes}-${String(pl.dia).padStart(2, "0")}`, presencial, consultorId: v.consultorId });
   }
   for (const v of doRecorte) {
     const c = porProfissional.get(v.chave) ?? { n: 0, presencial: 0, video: 0 };
@@ -154,19 +170,26 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
     for (const k of [...porProfissional.keys()]) if (!naFaixa(n(k), f.contatos)) porProfissional.delete(k);
   }
 
-  const noPainel = new Set(painel.map((p) => p.chave));
   const feitas = (k: string) => porProfissional.get(k)?.n ?? 0;
+  // Visitas de cada profissional em cada ciclo do recorte ("chave|YYYY-MM").
+  const porCiclo = new Map<string, number>();
+  for (const v of doRecorte) porCiclo.set(`${v.chave}|${v.mes}`, (porCiclo.get(`${v.chave}|${v.mes}`) ?? 0) + 1);
+  const feitasNoCiclo = (k: string, m: string) => porCiclo.get(`${k}|${m}`) ?? 0;
 
-  // Cadastro e meta de contatos
+  // Cadastro e meta de contatos (a meta vale para cada ciclo do recorte)
   const estabelecimentos = painel.filter((p) => p.estabelecimento).length;
-  const metaContatos = painel.reduce((s, p) => s + p.contatos, 0);
-  const contatosNaMeta = painel.reduce((s, p) => s + Math.min(feitas(p.chave), p.contatos), 0);
-  const excedentes = painel.reduce((s, p) => s + Math.max(0, feitas(p.chave) - p.contatos), 0);
-  const completos = painel.filter((p) => feitas(p.chave) >= p.contatos).length;
+  const somaCiclos = (fn: (p: Profissional, m: string) => number) => painel.reduce((s, p) => s + meses.reduce((t, m) => t + fn(p, m), 0), 0);
+  const metaContatos = somaCiclos((p) => p.contatos);
+  const contatosNaMeta = somaCiclos((p, m) => Math.min(feitasNoCiclo(p.chave, m), p.contatos));
+  const excedentes = somaCiclos((p, m) => Math.max(0, feitasNoCiclo(p.chave, m) - p.contatos));
+  const completos = painel.filter((p) => meses.every((m) => feitasNoCiclo(p.chave, m) >= p.contatos)).length;
+  // O que ainda falta da meta só pode ser feito no ciclo atual.
+  const faltamNoAtual = noRecorte.has(atual) ? painel.reduce((s, p) => s + Math.max(0, p.contatos - feitasNoCiclo(p.chave, atual)), 0) : 0;
 
-  // Execução
+  // Execução: a 1ª visita de cada profissional em cada ciclo é a primeira; as demais, revisitas.
   const realizadas = doRecorte.length;
   const presenciais = doRecorte.filter((v) => v.presencial).length;
+  const primeiras = porCiclo.size;
   const unicos = porProfissional.size;
   const unicosPainel = painel.filter((p) => feitas(p.chave) > 0).length;
   const multi = [...porProfissional.values()].filter((c) => c.n >= 2).length;
@@ -196,10 +219,10 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
     video: doRecorte.filter((v) => v.dia === dia && !v.presencial).length,
   }));
 
-  const cicloAtual = mes === chaveMes(agora);
+  const cicloAtual = noRecorte.has(atual);
 
   return {
-    mes,
+    meses,
     cicloAtual,
     cadastro: {
       profissionais: painel.length - estabelecimentos,
@@ -213,14 +236,14 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
       coberturaContatos: pct(contatosNaMeta, metaContatos),
       excedentes,
       realizadas,
-      primeiras: unicos,
-      revisitas: realizadas - unicos,
+      primeiras,
+      revisitas: realizadas - primeiras,
       presenciais,
       videos: realizadas - presenciais,
       percPresencial: pct(presenciais, realizadas),
       percVideo: realizadas > 0 ? umaCasa(100 - pct(presenciais, realizadas)) : 0,
       mediaPorDiaUtil: dias.transcorridos > 0 ? umaCasa(realizadas / dias.transcorridos) : 0,
-      necessarioPorDiaUtil: cicloAtual && dias.restantes > 0 ? umaCasa(Math.max(0, metaContatos - contatosNaMeta) / dias.restantes) : null,
+      necessarioPorDiaUtil: cicloAtual && dias.restantes > 0 ? umaCasa(faltamNoAtual / dias.restantes) : null,
       consultores: new Set(doRecorte.map((v) => v.consultorId)).size,
     },
     alcance: {
@@ -248,15 +271,16 @@ async function calcularCiclo(f: FiltrosVisao, agora: Date) {
 }
 
 export async function visaoGeral(f: FiltrosVisao, agora = new Date()) {
-  const atual = await calcularCiclo(f, agora);
-  const anterior = await calcularCiclo({ ...f, mes: deslocarMes(atual.mes, -1) }, agora);
+  const recorte = await calcularCiclo(f, agora);
+  // Período anterior do mesmo tamanho (ex.: 3 ciclos → os 3 meses antes de cada um), com os mesmos filtros.
+  const anterior = await calcularCiclo({ ...f, meses: recorte.meses.map((m) => deslocarMes(m, -recorte.meses.length)) }, agora);
   return {
-    ...atual,
-    // Ciclo anterior com os mesmos filtros, para a comparação nas respostas rápidas (nulo se não teve visitas).
+    ...recorte,
+    // Para a comparação nas respostas rápidas (nulo se o período anterior não teve visitas).
     anterior:
       anterior.execucao.realizadas > 0
         ? {
-            mes: anterior.mes,
+            meses: anterior.meses,
             mediaPorDiaUtil: anterior.execucao.mediaPorDiaUtil,
             coberturaPainel: anterior.alcance.coberturaPainel,
             coberturaContatos: anterior.execucao.coberturaContatos,

@@ -79,7 +79,7 @@ model MedicoClinica {
   padraoHorario       String
   nivelRelacionamento String?                @default("novo")
   // Contatos que o consultor planeja ter com o profissional em cada ciclo (mês): 1 = só a primeira
-  // visita; 4 = primeira + 3 revisitas. É do profissional, igual em todos os endereços dele.
+  // visita; 4 = primeira + 3 revisitas, o máximo. É do profissional, igual em todos os endereços dele.
   contatosCiclo       Int                    @default(1)
   // Profissional: medico, nutricionista, farmaceutico, educador_fisico, fisioterapeuta, esteticista, clinica, academia.
   profissao           String?
