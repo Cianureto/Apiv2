@@ -132,9 +132,9 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
       orderBy: { dataHora: "asc" },
     }),
     prisma.visita.findMany({ where: { consultorId, dataHora: { gte: semana.inicio, lte: semana.fim } }, select: { status: true } }),
-    // Carteira do consultor: médicos dele + os ainda sem consultor responsável.
+    // Carteira do consultor (vínculo fixo). Os sem consultor ficam no limbo até o gestor aprovar um pedido.
     prisma.medicoClinica.findMany({
-      where: { OR: [{ consultorId }, { consultorId: null }] },
+      where: { consultorId },
       orderBy: { nomeMedico: "asc" },
     }),
     prisma.visita.findMany({
@@ -191,10 +191,8 @@ router.get("/painel", async (req: RequisicaoAutenticada, res) => {
       motivo: atendeHojeFlag ? "Atende hoje e está sem visita há mais de 30 dias" : "Atende amanhã e está sem visita há mais de 30 dias",
     }));
 
-  // Meta de cobertura: % da carteira (médicos dela já atribuídos a ele; se ainda não tiver
-  // nenhum, usa a carteira disponível — dele + sem dono) visitada (realizado) no mês.
-  const meusMedicos = medicos.filter((m) => m.consultorId === consultorId);
-  const carteira = meusMedicos.length > 0 ? meusMedicos : medicos;
+  // Meta de cobertura: % da carteira do consultor visitada (realizado) no mês.
+  const carteira = medicos;
   const idsCarteira = new Set(carteira.map((m) => m.id));
   const visitadosNoMes = new Set(visitasRealizadasNoMes.map((v) => v.medicoClinicaId).filter((id) => idsCarteira.has(id)));
   const totalCarteira = carteira.length;

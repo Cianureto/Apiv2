@@ -12,6 +12,7 @@ import ausenciasRoutes from "./routes/ausencias";
 import materiaisRoutes from "./routes/materiais";
 import apresentacoesRoutes from "./routes/apresentacoes";
 import receitasRoutes from "./routes/receitas";
+import solicitacoesRoutes from "./routes/solicitacoes";
 import { ErroHttp } from "./lib/erros";
 
 const app = express();

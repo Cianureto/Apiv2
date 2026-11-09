@@ -9,6 +9,7 @@ import { serializarVisitaGestor } from "../lib/serializar";
 import { LISTA_PROFISSOES, UFS, conselhoDaProfissao, formatarRegistro, normalizarNumeroRegistro } from "../lib/profissional";
 import { exigirAutenticacao, RequisicaoAutenticada } from "../middleware/auth";
 import { chaveProfissional, contatosFeitosNoCiclo } from "../lib/ciclo";
+import { filtroGrupo, pedirParaCarteira } from "../lib/carteira";
 
 const router = Router();
 router.use(exigirAutenticacao);
@@ -29,7 +30,7 @@ const visivelParaConsultor = (consultorId: string): Prisma.MedicoClinicaWhereInp
 // Leitura liberada para gestor e consultor (precisa escolher médico/clínica ao agendar).
 // Para o consultor, cada médico vem com a última visita enviada e a próxima planejada dele.
 // Um médico só pode ter um consultor responsável: o consultor só vê os seus + os ainda sem dono
-// (que ele pode "assumir" ao editar). O gestor continua vendo todos.
+// (que ele pode pedir para a carteira; o gestor aprova). O gestor continua vendo todos.
 // `escopo=carteira` traz só os do consultor (vínculo fixo); `escopo=livres`, só os ainda sem responsável
 // (o "limbo", que ele consulta quando quer puxar alguém). Sem escopo, o consultor recebe os dois juntos.
 router.get("/", async (req: RequisicaoAutenticada, res) => {
@@ -52,6 +53,23 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
   const ultima = new Map<string, Date>();
   const proxima = new Map<string, Date>();
   let feitosNoCiclo = new Map<string, number>();
+  // No limbo, o consultor vê em cada profissional o pedido dele: pendente ou recusado (últimos 30 dias).
+  const meusPedidos = new Map<string, { id: string; status: "pendente" | "recusada"; motivo: string | null }>();
+  if (ehConsultor && escopo === "livres") {
+    const pedidos = await prisma.solicitacaoCarteira.findMany({
+      where: {
+        consultorId: req.usuario!.id,
+        OR: [{ status: "pendente" }, { status: "recusada", decididoEm: { gte: new Date(Date.now() - 30 * 86400000) } }],
+      },
+      include: { medicoClinica: { select: { id: true, grupoId: true } } },
+      orderBy: { createdAt: "asc" },
+    });
+    for (const p of pedidos) {
+      const k = chaveProfissional(p.medicoClinica);
+      if (meusPedidos.get(k)?.status === "pendente") continue;
+      meusPedidos.set(k, { id: p.id, status: p.status as "pendente" | "recusada", motivo: p.motivo });
+    }
+  }
   if (ehConsultor) {
     feitosNoCiclo = await contatosFeitosNoCiclo(req.usuario!.id);
     const agora = new Date();
@@ -76,6 +94,7 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
     proximaVisitaEm: proxima.get(m.id)?.toISOString() ?? null,
     // Visitas realizadas pelo consultor neste ciclo, somando todos os endereços do profissional.
     contatosFeitosNoCiclo: ehConsultor ? (feitosNoCiclo.get(chaveProfissional(m)) ?? 0) : null,
+    minhaSolicitacao: m.consultorId === null ? (meusPedidos.get(chaveProfissional(m)) ?? null) : null,
   }));
 
   const especialidadesExistentes = Array.from(new Set(medicos.map((m) => m.especialidade).filter(Boolean)));
@@ -83,11 +102,6 @@ router.get("/", async (req: RequisicaoAutenticada, res) => {
 
   res.json({ medicos: comStatus, especialidadesExistentes, clinicasExistentes });
 });
-
-/** Endereços do mesmo profissional: mesmo grupoId (cadastros antigos sem grupo ficam sozinhos). */
-function filtroGrupo(m: Pick<MedicoClinica, "id" | "grupoId">): Prisma.MedicoClinicaWhereInput {
-  return m.grupoId ? { grupoId: m.grupoId } : { id: m.id };
-}
 
 async function carregarVisivel(req: RequisicaoAutenticada, id: string) {
   const medico = await prisma.medicoClinica.findUnique({ where: { id }, include: { consultor: { select: { nome: true } } } });
@@ -246,22 +260,24 @@ function erroDuplicado(req: RequisicaoAutenticada, existente: NonNullable<Awaite
   } else if (existente.consultorId) {
     erro = `${quem} já está cadastrado com outro consultor.`;
   } else {
-    erro = `${quem} já está cadastrado, ainda sem consultor. Puxe para a sua carteira para usar o cadastro existente.`;
+    erro = `${quem} já está cadastrado, ainda sem consultor. Peça para a sua carteira para usar o cadastro existente (o gestor aprova).`;
   }
   const podeAbrir = req.usuario!.papel === "gestor" || !existente.consultorId || existente.consultorId === req.usuario!.id;
-  // Consultor tentando cadastrar alguém que já está sem responsável: a tela oferece puxar para a carteira dele.
+  // Consultor tentando cadastrar alguém que já está sem responsável: a tela oferece pedir para a carteira dele.
   const podeAssumir = req.usuario!.papel === "consultor" && !existente.consultorId;
   return { erro, medicoExistenteId: podeAbrir ? existente.id : null, podeAssumir };
 }
 
-// Gestor edita/exclui qualquer médico. Consultor só o seu ou um ainda sem dono (e, ao editar um
-// sem dono, assume a responsabilidade por ele e pelos outros endereços dele).
+// Gestor edita/exclui qualquer médico. Consultor só os da carteira dele: um sem consultor ele pede
+// para a carteira e o gestor aprova (editar, adicionar endereço ou remover não tomam mais o profissional).
 async function exigirDonoOuGestorMedico(req: RequisicaoAutenticada, res: Response, next: NextFunction) {
   const medico = await prisma.medicoClinica.findUnique({ where: { id: String(req.params.id) }, select: { consultorId: true } });
   if (!medico) throw new ErroHttp(404, "Médico não encontrado.");
-  const ehDono = req.usuario!.papel === "gestor" || medico.consultorId === null || medico.consultorId === req.usuario!.id;
-  if (!ehDono) return res.status(403).json({ erro: "Esse médico já está cadastrado com outro consultor." });
-  next();
+  if (req.usuario!.papel === "gestor" || medico.consultorId === req.usuario!.id) return next();
+  const erro = medico.consultorId === null
+    ? "Esse profissional ainda não tem consultor. Peça para a sua carteira; depois que o gestor aprovar, você pode alterar o cadastro."
+    : "Esse médico já está cadastrado com outro consultor.";
+  return res.status(403).json({ erro });
 }
 
 const primeiraMensagem = (e: z.ZodError) => e.issues[0]?.message ?? "Dados inválidos.";
@@ -326,29 +342,20 @@ router.patch("/:id", exigirDonoOuGestorMedico, async (req: RequisicaoAutenticada
   const duplicado = await buscarDuplicado(identidade, endereco.endereco, atual);
   if (duplicado) return res.status(409).json(erroDuplicado(req, duplicado));
 
-  // Consultor que edita um registro ainda sem dono assume a responsabilidade por ele.
-  const dono = req.usuario!.papel === "consultor" ? { consultorId: req.usuario!.id } : {};
   const medico = await prisma.$transaction(async (tx) => {
-    await tx.medicoClinica.updateMany({ where: filtroGrupo(atual), data: { ...identidade, ...dono } });
+    await tx.medicoClinica.updateMany({ where: filtroGrupo(atual), data: identidade });
     return tx.medicoClinica.update({ where: { id: atual.id }, data: endereco });
   });
   res.json({ medico });
 });
 
-// POST /medicos/:id/assumir — o consultor puxa para a carteira dele um profissional ainda sem responsável
-// (todos os endereços dele), sem precisar editar o cadastro.
+// POST /medicos/:id/assumir — o consultor pede para levar à carteira dele um profissional ainda sem
+// consultor (todos os endereços dele). Fica pendente até o gestor aprovar em /solicitacoes.
 router.post("/:id/assumir", async (req: RequisicaoAutenticada, res) => {
-  if (req.usuario!.papel !== "consultor") return res.status(403).json({ erro: "Só o consultor puxa profissionais para a carteira." });
-  const medico = await prisma.medicoClinica.findUnique({ where: { id: String(req.params.id) }, select: { id: true, grupoId: true, consultorId: true, nomeMedico: true } });
-  if (!medico) throw new ErroHttp(404, "Médico não encontrado.");
-  if (medico.consultorId === req.usuario!.id) return res.json({ ok: true, jaEraSeu: true });
-  // Só assume se continuar sem dono no momento da gravação (dois consultores ao mesmo tempo não ficam com o mesmo).
-  const { count } = await prisma.medicoClinica.updateMany({
-    where: { AND: [filtroGrupo(medico), { consultorId: null }] },
-    data: { consultorId: req.usuario!.id },
-  });
-  if (count === 0) return res.status(409).json({ erro: `${medico.nomeMedico} já está com outro consultor.` });
-  res.json({ ok: true, enderecos: count });
+  if (req.usuario!.papel !== "consultor") return res.status(403).json({ erro: "Só o consultor pede profissionais para a carteira." });
+  const { solicitacao, jaEraSeu } = await pedirParaCarteira(req.usuario!.id, String(req.params.id));
+  if (jaEraSeu) return res.json({ ok: true, jaEraSeu: true });
+  res.status(202).json({ ok: true, pendente: true, solicitacao: { id: solicitacao!.id, status: solicitacao!.status, motivo: solicitacao!.motivo } });
 });
 
 const contatosSchema = z.object({
@@ -364,7 +371,7 @@ router.patch("/:id/contatos", async (req: RequisicaoAutenticada, res) => {
   if (!medico) throw new ErroHttp(404, "Médico não encontrado.");
   if (req.usuario!.papel !== "consultor" || medico.consultorId !== req.usuario!.id) {
     const erro = medico.consultorId === null
-      ? "Puxe o profissional para a sua carteira antes de definir os contatos do ciclo."
+      ? "Peça o profissional para a sua carteira antes de definir os contatos do ciclo."
       : "Só o consultor responsável define os contatos do ciclo.";
     return res.status(403).json({ erro });
   }

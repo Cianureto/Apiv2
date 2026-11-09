@@ -41,6 +41,14 @@ enum CanalVisita {
   outro
 }
 
+// Pedido do consultor para levar um profissional sem consultor (o "limbo") para a carteira dele.
+enum StatusSolicitacao {
+  pendente
+  aprovada
+  recusada
+  cancelada
+}
+
 enum TipoAusencia {
   ferias
   treinamento
@@ -68,6 +76,8 @@ model Usuario {
   materiaisCriados     Material[]             @relation("MaterialCriadoPor")
   medicosResponsavel   MedicoClinica[]        @relation("MedicoResponsavel")
   importacoesReceitas  ImportacaoReceitas[]   @relation("ImportacaoConsultor")
+  solicitacoes         SolicitacaoCarteira[]  @relation("SolicitacaoConsultor")
+  solicitacoesDecididas SolicitacaoCarteira[] @relation("SolicitacaoDecididaPor")
 }
 
 model MedicoClinica {
@@ -114,6 +124,7 @@ model MedicoClinica {
   updatedAt           DateTime               @updatedAt
   visitas             Visita[]
   apresentacoes       RegistroApresentacao[]
+  solicitacoes        SolicitacaoCarteira[]
 
   @@index([grupoId])
   @@index([conselho, conselhoUf, registroNumero])
@@ -287,4 +298,25 @@ model LinhaReceita {
 
   @@index([chave])
   @@index([importacaoId])
+}
+
+// O consultor pede um profissional sem consultor; o gestor aprova (o profissional, com todos os
+// endereços, passa para a carteira dele) ou recusa, com um motivo opcional. Um pedido pendente por
+// consultor e profissional; aprovar um recusa os pedidos dos outros consultores pelo mesmo profissional.
+model SolicitacaoCarteira {
+  id              String            @id @default(cuid())
+  medicoClinicaId String
+  medicoClinica   MedicoClinica     @relation(fields: [medicoClinicaId], references: [id], onDelete: Cascade)
+  consultorId     String
+  consultor       Usuario           @relation("SolicitacaoConsultor", fields: [consultorId], references: [id], onDelete: Cascade)
+  status          StatusSolicitacao @default(pendente)
+  motivo          String?
+  decididoPorId   String?
+  decididoPor     Usuario?          @relation("SolicitacaoDecididaPor", fields: [decididoPorId], references: [id], onDelete: SetNull)
+  decididoEm      DateTime?
+  createdAt       DateTime          @default(now())
+
+  @@index([status, createdAt])
+  @@index([consultorId, status])
+  @@index([medicoClinicaId])
 }
