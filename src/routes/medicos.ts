@@ -30,10 +30,21 @@ const visivelParaConsultor = (consultorId: string): Prisma.MedicoClinicaWhereInp
 // Para o consultor, cada médico vem com a última visita enviada e a próxima planejada dele.
 // Um médico só pode ter um consultor responsável: o consultor só vê os seus + os ainda sem dono
 // (que ele pode "assumir" ao editar). O gestor continua vendo todos.
+// `escopo=carteira` traz só os do consultor (vínculo fixo); `escopo=livres`, só os ainda sem responsável
+// (o "limbo", que ele consulta quando quer puxar alguém). Sem escopo, o consultor recebe os dois juntos.
 router.get("/", async (req: RequisicaoAutenticada, res) => {
   const ehConsultor = req.usuario!.papel === "consultor";
+  const escopo = req.query.escopo;
+  const where: Prisma.MedicoClinicaWhereInput | undefined =
+    escopo === "livres"
+      ? { consultorId: null }
+      : ehConsultor
+        ? escopo === "carteira"
+          ? { consultorId: req.usuario!.id }
+          : visivelParaConsultor(req.usuario!.id)
+        : undefined;
   const medicos = await prisma.medicoClinica.findMany({
-    where: ehConsultor ? visivelParaConsultor(req.usuario!.id) : undefined,
+    where,
     include: { consultor: { select: { nome: true } } },
     orderBy: { nomeMedico: "asc" },
   });
@@ -235,10 +246,12 @@ function erroDuplicado(req: RequisicaoAutenticada, existente: NonNullable<Awaite
   } else if (existente.consultorId) {
     erro = `${quem} já está cadastrado com outro consultor.`;
   } else {
-    erro = `${quem} já está cadastrado, ainda sem consultor. Abra a ficha e edite para assumir.`;
+    erro = `${quem} já está cadastrado, ainda sem consultor. Puxe para a sua carteira para usar o cadastro existente.`;
   }
   const podeAbrir = req.usuario!.papel === "gestor" || !existente.consultorId || existente.consultorId === req.usuario!.id;
-  return { erro, medicoExistenteId: podeAbrir ? existente.id : null };
+  // Consultor tentando cadastrar alguém que já está sem responsável: a tela oferece puxar para a carteira dele.
+  const podeAssumir = req.usuario!.papel === "consultor" && !existente.consultorId;
+  return { erro, medicoExistenteId: podeAbrir ? existente.id : null, podeAssumir };
 }
 
 // Gestor edita/exclui qualquer médico. Consultor só o seu ou um ainda sem dono (e, ao editar um
@@ -322,6 +335,22 @@ router.patch("/:id", exigirDonoOuGestorMedico, async (req: RequisicaoAutenticada
   res.json({ medico });
 });
 
+// POST /medicos/:id/assumir — o consultor puxa para a carteira dele um profissional ainda sem responsável
+// (todos os endereços dele), sem precisar editar o cadastro.
+router.post("/:id/assumir", async (req: RequisicaoAutenticada, res) => {
+  if (req.usuario!.papel !== "consultor") return res.status(403).json({ erro: "Só o consultor puxa profissionais para a carteira." });
+  const medico = await prisma.medicoClinica.findUnique({ where: { id: String(req.params.id) }, select: { id: true, grupoId: true, consultorId: true, nomeMedico: true } });
+  if (!medico) throw new ErroHttp(404, "Médico não encontrado.");
+  if (medico.consultorId === req.usuario!.id) return res.json({ ok: true, jaEraSeu: true });
+  // Só assume se continuar sem dono no momento da gravação (dois consultores ao mesmo tempo não ficam com o mesmo).
+  const { count } = await prisma.medicoClinica.updateMany({
+    where: { AND: [filtroGrupo(medico), { consultorId: null }] },
+    data: { consultorId: req.usuario!.id },
+  });
+  if (count === 0) return res.status(409).json({ erro: `${medico.nomeMedico} já está com outro consultor.` });
+  res.json({ ok: true, enderecos: count });
+});
+
 const contatosSchema = z.object({
   contatosCiclo: z.number({ message: "Informe a quantidade de contatos." }).int().min(1, "O mínimo é 1 contato por ciclo.").max(4, "O máximo é 4 contatos por ciclo (primeira visita + 3 revisitas)."),
 });
@@ -335,7 +364,7 @@ router.patch("/:id/contatos", async (req: RequisicaoAutenticada, res) => {
   if (!medico) throw new ErroHttp(404, "Médico não encontrado.");
   if (req.usuario!.papel !== "consultor" || medico.consultorId !== req.usuario!.id) {
     const erro = medico.consultorId === null
-      ? "Assuma o profissional (editar cadastro) antes de definir os contatos do ciclo."
+      ? "Puxe o profissional para a sua carteira antes de definir os contatos do ciclo."
       : "Só o consultor responsável define os contatos do ciclo.";
     return res.status(403).json({ erro });
   }
