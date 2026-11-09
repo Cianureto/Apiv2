@@ -137,6 +137,12 @@ router.post("/", async (req: RequisicaoAutenticada, res) => {
     consultorId = parsed.data.consultorId;
   } else {
     consultorId = req.usuario!.id;
+    // Consultor só agenda com profissionais da carteira dele; os sem consultor ele pede ao gestor antes.
+    const medico = await prisma.medicoClinica.findUnique({ where: { id: medicoClinicaId }, select: { consultorId: true } });
+    if (!medico || (medico.consultorId !== null && medico.consultorId !== consultorId)) throw new ErroHttp(404, "Médico não encontrado.");
+    if (medico.consultorId === null) {
+      return res.status(403).json({ erro: "Esse profissional ainda não está na sua carteira. Peça para a sua carteira em Contas; depois que o gestor aprovar, você pode agendar." });
+    }
   }
 
   validarJanelaRegistro(dataHora);

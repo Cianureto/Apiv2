@@ -52,6 +52,7 @@ app.use("/ausencias", ausenciasRoutes);
 app.use("/materiais", materiaisRoutes);
 app.use("/apresentacoes", apresentacoesRoutes);
 app.use("/receitas", receitasRoutes);
+app.use("/solicitacoes", solicitacoesRoutes);
 
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (err instanceof ErroHttp) return res.status(err.status).json({ erro: err.message, ...(err.detalhes ? { detalhes: err.detalhes } : {}) });
